@@ -8,6 +8,11 @@ public class DataController {
 
     @GetMapping("/")
     public String index() {
+        return "My Root Page";
+    }
+
+    @GetMapping("/home")
+    public String home() {
         return "My Home Page";
     }
 }
