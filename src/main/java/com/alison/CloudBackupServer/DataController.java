@@ -1,5 +1,6 @@
 package com.alison.CloudBackupServer;
 
+import com.google.gson.JsonObject;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -13,6 +14,8 @@ public class DataController {
 
     @GetMapping("/home")
     public String home() {
-        return "My Home Page";
+        JsonObject obj = new JsonObject();
+        obj.addProperty("Hello", "WORLD");
+        return obj.toString();
     }
 }
