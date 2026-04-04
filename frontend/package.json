@@ -1,0 +1,20 @@
+{
+  "name": "cloud-backup-client",
+  "version": "0.1.0",
+  "description": "Cloud Backup desktop client built with Electron",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "keywords": ["cloud", "backup", "electron"],
+  "license": "GPL-3.0",
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0"
+  },
+  "dependencies": {
+    "electron": "^28.2.0"
+  }
+}

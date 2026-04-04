@@ -1,0 +1,234 @@
+openapi: 3.0.3
+info:
+  title: Cloud Backup Server API
+  description: |
+    REST API for the Cloud Backup Server.
+
+    Authentication uses JWT bearer tokens. Obtain a token via `/api/auth/login` or
+    `/api/auth/register` and include it in subsequent requests as:
+    `Authorization: Bearer <token>`
+  version: 0.1.0
+  license:
+    name: GNU General Public License v3.0
+    url: https://www.gnu.org/licenses/gpl-3.0.html
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+tags:
+  - name: Health
+    description: Server health and readiness
+  - name: Auth
+    description: Authentication and session management
+
+paths:
+  /api/health:
+    get:
+      summary: Health check
+      description: Returns the current health status and version of the server.
+      operationId: getHealth
+      tags: [Health]
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                version: 0.1.0
+
+  /api/session:
+    get:
+      summary: Get current session state
+      description: |
+        Returns whether the caller is authenticated.
+        If a valid `Authorization: Bearer <token>` header is provided, `logged_in` is `true`
+        and the `user` field is populated. Otherwise `logged_in` is `false` and `user` is omitted.
+        This endpoint never returns an error for missing or invalid tokens — it always returns 200.
+      operationId: getSession
+      tags: [Auth]
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Session state (always 200, even when not authenticated)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+              examples:
+                loggedOut:
+                  summary: Not authenticated
+                  value:
+                    logged_in: false
+                loggedIn:
+                  summary: Authenticated
+                  value:
+                    logged_in: true
+                    user:
+                      id: 1
+                      username: alice
+                      email: alice@example.com
+
+  /api/auth/login:
+    post:
+      summary: Log in
+      description: Authenticates a user with username and password. Returns a JWT on success.
+      operationId: login
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/auth/register:
+    post:
+      summary: Register
+      description: Creates a new user account. Returns a JWT on success.
+      operationId: register
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Registration successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+          example: 0.1.0
+
+    SessionResponse:
+      type: object
+      required: [logged_in]
+      properties:
+        logged_in:
+          type: boolean
+        user:
+          $ref: "#/components/schemas/UserInfo"
+          nullable: true
+
+    UserInfo:
+      type: object
+      required: [id, username, email]
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 1
+        username:
+          type: string
+          example: alice
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          example: alice
+        password:
+          type: string
+          format: password
+          example: "hunter2"
+
+    RegisterRequest:
+      type: object
+      required: [username, email, password]
+      properties:
+        username:
+          type: string
+          example: alice
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        password:
+          type: string
+          format: password
+          example: "hunter2"
+
+    AuthResponse:
+      type: object
+      required: [token, user]
+      properties:
+        token:
+          type: string
+          description: JWT bearer token (expires in 24 h)
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        user:
+          $ref: "#/components/schemas/UserInfo"
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: invalid credentials
+
+  responses:
+    BadRequest:
+      description: Invalid request body or missing required fields
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Authentication failed (wrong credentials)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Resource already exists (duplicate username or email)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
