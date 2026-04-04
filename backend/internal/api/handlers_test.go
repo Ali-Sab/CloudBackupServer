@@ -12,7 +12,7 @@ import (
 	"github.com/ali-sab/cloudbackupserver/backend/internal/session"
 )
 
-// newTestRouter returns a router with no database (nil pool).
+// newTestRouter returns a router with a nil DB pool.
 // Safe for endpoints that do not touch the DB: /api/health, /api/session.
 func newTestRouter() http.Handler {
 	svc := session.NewService("test-secret-for-unit-tests")
@@ -73,9 +73,8 @@ func TestGetSession_InvalidToken(t *testing.T) {
 }
 
 func TestGetSession_WrongSigningKey(t *testing.T) {
-	// Token signed with a different secret should not be trusted.
 	otherSvc := session.NewService("different-secret")
-	token, err := otherSvc.CreateToken(1, "alice", "alice@example.com")
+	token, err := otherSvc.CreateAccessToken(1, "alice", "alice@example.com")
 	require.NoError(t, err)
 
 	r := newTestRouter()
@@ -91,10 +90,10 @@ func TestGetSession_WrongSigningKey(t *testing.T) {
 	assert.False(t, resp.LoggedIn)
 }
 
-func TestGetSession_ValidToken(t *testing.T) {
+func TestGetSession_ValidAccessToken(t *testing.T) {
 	r, svc := newTestRouterWithSvc()
 
-	token, err := svc.CreateToken(42, "bob", "bob@example.com")
+	token, err := svc.CreateAccessToken(42, "bob", "bob@example.com")
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/session", nil)
@@ -141,4 +140,35 @@ func TestCORSPreflightRequest(t *testing.T) {
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestSessionSvc_GenerateAndHashRefreshToken(t *testing.T) {
+	raw, hash, err := session.GenerateRefreshToken()
+	require.NoError(t, err)
+	assert.NotEmpty(t, raw)
+	assert.NotEmpty(t, hash)
+	assert.NotEqual(t, raw, hash)
+
+	// HashToken must be deterministic
+	assert.Equal(t, hash, session.HashToken(raw))
+
+	// Different tokens must produce different hashes
+	raw2, hash2, err := session.GenerateRefreshToken()
+	require.NoError(t, err)
+	assert.NotEqual(t, raw, raw2)
+	assert.NotEqual(t, hash, hash2)
+}
+
+func TestSessionSvc_AccessTokenRoundtrip(t *testing.T) {
+	svc := session.NewService("unit-test-secret")
+
+	token, err := svc.CreateAccessToken(7, "testuser", "test@example.com")
+	require.NoError(t, err)
+	assert.NotEmpty(t, token)
+
+	claims, err := svc.ValidateAccessToken(token)
+	require.NoError(t, err)
+	assert.Equal(t, int64(7), claims.UserID)
+	assert.Equal(t, "testuser", claims.Username)
+	assert.Equal(t, "test@example.com", claims.Email)
 }

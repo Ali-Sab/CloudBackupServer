@@ -1,89 +1,69 @@
 /**
- * Unit tests for CloudBackup renderer logic.
+ * Unit tests for app.js pure functions: fetchSession, renderSessionState, escapeHtml.
  * All tests run in Jest/jsdom — no real backend or Electron required.
  */
 
-// Provide a stub document.createElement so escapeHtml works in jsdom
-const CloudBackup = require('../src/renderer/app');
+'use strict';
+
+// Prevent the browser-only DOM block from running during import
+global.window = global.window || {};
+window._testMode = true;
+
+// Provide stub tokenstore so api-client loads cleanly
+const { TokenStore } = require('../src/renderer/api-client');
+
+// Expose APIClient on window so app.js can pick it up in non-require mode.
+// In Jest (Node), require() path is used, so this isn't strictly needed,
+// but keeps the env consistent.
+const { APIClient, AuthExpiredError } = require('../src/renderer/api-client');
+global.APIClient = APIClient;
+global.TokenStore = TokenStore;
+global.AuthExpiredError = AuthExpiredError;
+
+const { fetchSession, renderSessionState, escapeHtml } = require('../src/renderer/app');
 
 // ---- fetchSession ----
 
-describe('CloudBackup.fetchSession', () => {
-  let fetchMock;
-
+describe('fetchSession', () => {
   beforeEach(() => {
-    fetchMock = jest.fn();
-    global.fetch = fetchMock;
+    localStorage.clear();
+    global.fetch = jest.fn();
   });
+  afterEach(() => jest.resetAllMocks());
 
-  afterEach(() => {
-    jest.resetAllMocks();
-  });
-
-  test('calls /api/session with no Authorization header when token is null', async () => {
-    fetchMock.mockResolvedValueOnce({
+  test('returns session data on success', async () => {
+    global.fetch = jest.fn(async () => ({
       ok: true,
+      status: 200,
       json: async () => ({ logged_in: false }),
-    });
+    }));
 
-    const result = await CloudBackup.fetchSession(null);
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, opts] = fetchMock.mock.calls[0];
-    expect(url).toBe(`${CloudBackup.API_BASE_URL}/api/session`);
-    expect(opts.headers).not.toHaveProperty('Authorization');
+    const result = await fetchSession();
     expect(result.logged_in).toBe(false);
   });
 
-  test('calls /api/session with Authorization header when token is provided', async () => {
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        logged_in: true,
-        user: { id: 7, username: 'alice', email: 'alice@example.com' },
-      }),
-    });
-
-    const result = await CloudBackup.fetchSession('my.jwt.token');
-
-    const [, opts] = fetchMock.mock.calls[0];
-    expect(opts.headers['Authorization']).toBe('Bearer my.jwt.token');
-    expect(result.logged_in).toBe(true);
-    expect(result.user.username).toBe('alice');
-  });
-
-  test('throws when the server returns a non-OK status', async () => {
-    fetchMock.mockResolvedValueOnce({ ok: false, status: 503 });
-
-    await expect(CloudBackup.fetchSession(null)).rejects.toThrow('HTTP 503');
-  });
-
-  test('throws when fetch itself rejects (network error)', async () => {
-    fetchMock.mockRejectedValueOnce(new Error('Network failure'));
-
-    await expect(CloudBackup.fetchSession(null)).rejects.toThrow('Network failure');
+  test('throws when server returns non-OK status', async () => {
+    global.fetch = jest.fn(async () => ({ ok: false, status: 500, json: async () => ({}) }));
+    await expect(fetchSession()).rejects.toThrow('HTTP 500');
   });
 });
 
 // ---- renderSessionState ----
 
-describe('CloudBackup.renderSessionState', () => {
-  test('returns logged-out descriptor when logged_in is false', () => {
-    const state = CloudBackup.renderSessionState({ logged_in: false });
-    expect(state.type).toBe('logged-out');
-    expect(state.username).toBeUndefined();
+describe('renderSessionState', () => {
+  test('returns logged-out when not authenticated', () => {
+    expect(renderSessionState({ logged_in: false }).type).toBe('logged-out');
   });
 
-  test('returns logged-out descriptor when logged_in is false even with a user object', () => {
-    const state = CloudBackup.renderSessionState({
+  test('returns logged-out when logged_in is false even with user object', () => {
+    expect(renderSessionState({
       logged_in: false,
-      user: { id: 1, username: 'ghost', email: 'ghost@example.com' },
-    });
-    expect(state.type).toBe('logged-out');
+      user: { id: 1, username: 'ghost', email: 'g@x.com' },
+    }).type).toBe('logged-out');
   });
 
-  test('returns logged-in descriptor with user details when authenticated', () => {
-    const state = CloudBackup.renderSessionState({
+  test('returns logged-in with user details when authenticated', () => {
+    const state = renderSessionState({
       logged_in: true,
       user: { id: 3, username: 'bob', email: 'bob@example.com' },
     });
@@ -93,27 +73,28 @@ describe('CloudBackup.renderSessionState', () => {
   });
 
   test('returns logged-out when logged_in is true but user is missing', () => {
-    const state = CloudBackup.renderSessionState({ logged_in: true });
-    expect(state.type).toBe('logged-out');
+    expect(renderSessionState({ logged_in: true }).type).toBe('logged-out');
   });
 });
 
 // ---- escapeHtml ----
 
-describe('CloudBackup.escapeHtml', () => {
+describe('escapeHtml', () => {
   test('escapes < and > characters', () => {
-    expect(CloudBackup.escapeHtml('<script>')).not.toContain('<script>');
+    expect(escapeHtml('<script>')).not.toContain('<script>');
+    expect(escapeHtml('<script>')).toContain('&lt;');
   });
 
   test('escapes & character', () => {
-    expect(CloudBackup.escapeHtml('a & b')).toBe('a &amp; b');
+    expect(escapeHtml('a & b')).toBe('a &amp; b');
   });
 
   test('returns plain strings unchanged', () => {
-    expect(CloudBackup.escapeHtml('hello world')).toBe('hello world');
+    expect(escapeHtml('hello world')).toBe('hello world');
   });
 
-  test('coerces non-string input to string', () => {
-    expect(() => CloudBackup.escapeHtml(42)).not.toThrow();
+  test('coerces non-string input to string without throwing', () => {
+    expect(() => escapeHtml(42)).not.toThrow();
+    expect(escapeHtml(42)).toBe('42');
   });
 });
