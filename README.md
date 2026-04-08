@@ -50,7 +50,7 @@ make setup          # copies .env.example → .env, runs go mod tidy, npm instal
 $EDITOR .env
 
 # 3 — Start services
-make up             # starts postgres + backend via docker compose
+make up             # builds and starts postgres + backend via docker compose
 
 # 4 — Verify
 curl http://localhost:8080/api/health
@@ -60,7 +60,7 @@ curl http://localhost:8080/api/session
 # → {"logged_in":false}
 
 # 5 — Run the desktop frontend (in a separate terminal)
-cd frontend && npm start
+cd frontend && npm run dev
 ```
 
 ---
@@ -72,12 +72,17 @@ The full OpenAPI 3.0 specification lives at [`backend/api/openapi.yaml`](backend
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `GET` | `/api/health` | — | Health check |
-| `GET` | `/api/session` | Optional JWT | Current session state |
-| `POST` | `/api/auth/register` | — | Register a new user |
-| `POST` | `/api/auth/login` | — | Log in, receive JWT |
+| `GET` | `/api/session` | Bearer token | Current session state |
+| `POST` | `/api/auth/register` | — | Register with email + password |
+| `POST` | `/api/auth/login` | — | Log in, receive token pair |
+| `POST` | `/api/auth/refresh` | — | Rotate refresh token, get new pair |
+| `POST` | `/api/auth/logout` | — | Revoke refresh token |
+| `POST` | `/api/auth/forgot-password` | — | Request a password reset token |
+| `POST` | `/api/auth/reset-password` | — | Reset password using reset token |
 
-Authentication uses **Bearer tokens** (JWT, 24 h TTL).  
-Pass the token as: `Authorization: Bearer <token>`
+Authentication uses a **two-token scheme**:
+- **Access token** — short-lived JWT (1 minute). Pass as `Authorization: Bearer <token>`.
+- **Refresh token** — long-lived opaque token (30 days). Use `/api/auth/refresh` to get a new pair without re-entering credentials.
 
 ### Quick examples
 
@@ -85,12 +90,12 @@ Pass the token as: `Authorization: Bearer <token>`
 # Register
 curl -s -X POST http://localhost:8080/api/auth/register \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","email":"alice@example.com","password":"hunter2"}' | jq .
+  -d '{"email":"alice@example.com","password":"hunter2"}' | jq .
 
 # Login
 TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","password":"hunter2"}' | jq -r .token)
+  -d '{"email":"alice@example.com","password":"hunter2"}' | jq -r .access_token)
 
 # Authenticated session check
 curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/session | jq .
@@ -106,8 +111,7 @@ Migration files live in [`backend/migrations/`](backend/migrations/).
 To add a new migration:
 
 ```bash
-# Create the next migration file
-cat > backend/migrations/00002_add_files_table.sql <<'SQL'
+cat > backend/migrations/00005_add_files_table.sql <<'SQL'
 -- +goose Up
 -- +goose StatementBegin
 CREATE TABLE IF NOT EXISTS files (
@@ -128,6 +132,12 @@ SQL
 
 The next time the backend starts (or `make up` is run), the migration will be applied.
 
+To wipe the database and start fresh:
+
+```bash
+make db-reset
+```
+
 ---
 
 ## Testing
@@ -140,8 +150,7 @@ make test-frontend     # Jest tests
 # Both at once
 make test
 
-# Integration tests — requires a running PostgreSQL instance
-export TEST_DATABASE_URL="postgres://cloudbackup:cloudbackup_dev@localhost:5432/cloudbackup?sslmode=disable"
+# Integration tests — starts postgres automatically if not running
 make test-integration
 ```
 
@@ -155,8 +164,8 @@ make test-integration
 | `JWT_SECRET` | *(required)* | JWT signing secret — use a long random value |
 | `PORT` | `8080` | Port the backend listens on |
 | `POSTGRES_PASSWORD` | `cloudbackup_dev` | Postgres password (docker compose) |
+| `POSTGRES_PORT` | `5432` | Exposed postgres port (docker compose) |
 | `BACKEND_PORT` | `8080` | Exposed backend port (docker compose) |
-| `TEST_DATABASE_URL` | *(empty)* | Database for integration tests; tests skip if unset |
 
 Generate a secure JWT secret:
 
@@ -170,15 +179,16 @@ openssl rand -hex 32
 
 ```
 make setup             Install all deps, create .env
-make up                Start services (docker compose)
+make up                Build and start services (docker compose)
 make down              Stop services
+make db-reset          Wipe database volume and restart fresh
 make ps                Show service status
 make logs              Follow logs
 make build             Rebuild Docker images
 make test              Run all tests
 make test-backend      Go unit tests
 make test-frontend     Jest tests
-make test-integration  Integration tests (needs TEST_DATABASE_URL)
+make test-integration  Integration tests (starts postgres automatically)
 make clean             Remove build artefacts
 ```
 
