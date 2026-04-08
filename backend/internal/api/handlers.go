@@ -41,9 +41,8 @@ type SessionResponse struct {
 
 // UserInfo is the public-facing subset of a user record.
 type UserInfo struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
-	Email    string `json:"email"`
+	ID    int64  `json:"id"`
+	Email string `json:"email"`
 }
 
 // AuthResponse is returned after a successful login or registration.
@@ -68,13 +67,12 @@ type ErrorResponse struct {
 
 // LoginRequest is the body expected by POST /api/auth/login.
 type LoginRequest struct {
-	Username string `json:"username"`
+	Email    string `json:"email"`
 	Password string `json:"password"`
 }
 
 // RegisterRequest is the body expected by POST /api/auth/register.
 type RegisterRequest struct {
-	Username string `json:"username"`
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
@@ -91,7 +89,7 @@ type LogoutRequest struct {
 
 // ForgotPasswordRequest is the body expected by POST /api/auth/forgot-password.
 type ForgotPasswordRequest struct {
-	Username string `json:"username"`
+	Email string `json:"email"`
 }
 
 // ForgotPasswordResponse is returned by POST /api/auth/forgot-password.
@@ -133,9 +131,8 @@ func (h *Handler) GetSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, SessionResponse{
 		LoggedIn: true,
 		User: &UserInfo{
-			ID:       claims.UserID,
-			Username: claims.Username,
-			Email:    claims.Email,
+			ID:    claims.UserID,
+			Email: claims.Email,
 		},
 	})
 }
@@ -147,12 +144,12 @@ func (h *Handler) PostLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
 		return
 	}
-	if req.Username == "" || req.Password == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "username and password are required"})
+	if req.Email == "" || req.Password == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "email and password are required"})
 		return
 	}
 
-	user, err := db.GetUserByUsername(r.Context(), h.db, req.Username)
+	user, err := db.GetUserByEmail(r.Context(), h.db, req.Email)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "invalid credentials"})
 		return
@@ -172,7 +169,7 @@ func (h *Handler) PostLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, AuthResponse{
 		AccessToken:  accessToken,
 		RefreshToken: rawRefresh,
-		User:         UserInfo{ID: user.ID, Username: user.Username, Email: user.Email},
+		User:         UserInfo{ID: user.ID, Email: user.Email},
 	})
 }
 
@@ -183,8 +180,8 @@ func (h *Handler) PostRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
 		return
 	}
-	if req.Username == "" || req.Email == "" || req.Password == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "username, email, and password are required"})
+	if req.Email == "" || req.Password == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "email and password are required"})
 		return
 	}
 
@@ -195,12 +192,11 @@ func (h *Handler) PostRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := &models.User{
-		Username:     req.Username,
 		Email:        req.Email,
 		PasswordHash: string(hash),
 	}
 	if err := db.CreateUser(r.Context(), h.db, user); err != nil {
-		writeJSON(w, http.StatusConflict, ErrorResponse{Error: "username or email already exists"})
+		writeJSON(w, http.StatusConflict, ErrorResponse{Error: "email already registered"})
 		return
 	}
 
@@ -213,7 +209,7 @@ func (h *Handler) PostRegister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, AuthResponse{
 		AccessToken:  accessToken,
 		RefreshToken: rawRefresh,
-		User:         UserInfo{ID: user.ID, Username: user.Username, Email: user.Email},
+		User:         UserInfo{ID: user.ID, Email: user.Email},
 	})
 }
 
@@ -266,7 +262,7 @@ func (h *Handler) PostRefresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, RefreshResponse{
 		AccessToken:  accessToken,
 		RefreshToken: rawRefresh,
-		User:         UserInfo{ID: user.ID, Username: user.Username, Email: user.Email},
+		User:         UserInfo{ID: user.ID, Email: user.Email},
 	})
 }
 
@@ -290,21 +286,21 @@ func (h *Handler) PostLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // PostForgotPassword handles POST /api/auth/forgot-password.
-// Issues a password-reset token. Response always looks the same to prevent username enumeration.
+// Issues a password-reset token. Response always looks the same to prevent email enumeration.
 // NOTE: reset_token is returned in the response body for development purposes only.
 //       In production this token would be sent via email and omitted from the response.
 func (h *Handler) PostForgotPassword(w http.ResponseWriter, r *http.Request) {
 	var req ForgotPasswordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Username == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "username is required"})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "email is required"})
 		return
 	}
 
 	genericMsg := "If the account exists, a reset token has been issued."
 
-	user, err := db.GetUserByUsername(r.Context(), h.db, req.Username)
+	user, err := db.GetUserByEmail(r.Context(), h.db, req.Email)
 	if err != nil {
-		// Don't reveal whether the username exists.
+		// Don't reveal whether the email exists.
 		writeJSON(w, http.StatusOK, ForgotPasswordResponse{Message: genericMsg})
 		return
 	}
@@ -381,7 +377,7 @@ func (h *Handler) PostResetPassword(w http.ResponseWriter, r *http.Request) {
 // issueTokenPair creates a new access token and refresh token for the given user,
 // persists the refresh token hash to the database, and returns both raw tokens.
 func (h *Handler) issueTokenPair(r *http.Request, user *models.User) (accessToken, rawRefresh string, err error) {
-	accessToken, err = h.sessionSvc.CreateAccessToken(user.ID, user.Username, user.Email)
+	accessToken, err = h.sessionSvc.CreateAccessToken(user.ID, user.Email)
 	if err != nil {
 		return "", "", err
 	}

@@ -79,7 +79,7 @@ paths:
                   summary: Authenticated
                   value:
                     logged_in: true
-                    user: {id: 1, username: alice, email: alice@example.com}
+                    user: {id: 1, email: alice@example.com}
 
   /api/auth/register:
     post:
@@ -106,7 +106,7 @@ paths:
 
   /api/auth/login:
     post:
-      summary: Log in with username and password
+      summary: Log in with email and password
       operationId: login
       tags: [Auth]
       requestBody:
@@ -185,8 +185,8 @@ paths:
       description: |
         Generates a single-use password reset token (1 hour TTL).
 
-        The response deliberately looks identical whether or not the username exists,
-        to prevent username enumeration.
+        The response deliberately looks identical whether or not the email exists,
+        to prevent email enumeration.
 
         **Development only**: `reset_token` is currently returned in the response body.
         In production this field will be removed and the token delivered by email.
@@ -200,7 +200,7 @@ paths:
               $ref: "#/components/schemas/ForgotPasswordRequest"
       responses:
         "200":
-          description: Reset token issued (or username not found — response is the same)
+          description: Reset token issued (or email not found — response is the same)
           content:
             application/json:
               schema:
@@ -268,15 +268,12 @@ components:
 
     UserInfo:
       type: object
-      required: [id, username, email]
+      required: [id, email]
       properties:
         id:
           type: integer
           format: int64
           example: 1
-        username:
-          type: string
-          example: alice
         email:
           type: string
           format: email
@@ -312,22 +309,20 @@ components:
 
     LoginRequest:
       type: object
-      required: [username, password]
+      required: [email, password]
       properties:
-        username:
+        email:
           type: string
-          example: alice
+          format: email
+          example: alice@example.com
         password:
           type: string
           format: password
 
     RegisterRequest:
       type: object
-      required: [username, email, password]
+      required: [email, password]
       properties:
-        username:
-          type: string
-          example: alice
         email:
           type: string
           format: email
@@ -354,11 +349,12 @@ components:
 
     ForgotPasswordRequest:
       type: object
-      required: [username]
+      required: [email]
       properties:
-        username:
+        email:
           type: string
-          example: alice
+          format: email
+          example: alice@example.com
 
     ForgotPasswordResponse:
       type: object
@@ -406,7 +402,7 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Conflict:
-      description: Resource already exists (duplicate username or email)
+      description: Resource already exists (duplicate email)
       content:
         application/json:
           schema:

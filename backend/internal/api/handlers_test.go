@@ -74,7 +74,7 @@ func TestGetSession_InvalidToken(t *testing.T) {
 
 func TestGetSession_WrongSigningKey(t *testing.T) {
 	otherSvc := session.NewService("different-secret")
-	token, err := otherSvc.CreateAccessToken(1, "alice", "alice@example.com")
+	token, err := otherSvc.CreateAccessToken(1, "alice@example.com")
 	require.NoError(t, err)
 
 	r := newTestRouter()
@@ -93,7 +93,7 @@ func TestGetSession_WrongSigningKey(t *testing.T) {
 func TestGetSession_ValidAccessToken(t *testing.T) {
 	r, svc := newTestRouterWithSvc()
 
-	token, err := svc.CreateAccessToken(42, "bob", "bob@example.com")
+	token, err := svc.CreateAccessToken(42, "bob@example.com")
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/session", nil)
@@ -108,7 +108,6 @@ func TestGetSession_ValidAccessToken(t *testing.T) {
 	assert.True(t, resp.LoggedIn)
 	require.NotNil(t, resp.User)
 	assert.Equal(t, int64(42), resp.User.ID)
-	assert.Equal(t, "bob", resp.User.Username)
 	assert.Equal(t, "bob@example.com", resp.User.Email)
 }
 
@@ -162,13 +161,12 @@ func TestSessionSvc_GenerateAndHashRefreshToken(t *testing.T) {
 func TestSessionSvc_AccessTokenRoundtrip(t *testing.T) {
 	svc := session.NewService("unit-test-secret")
 
-	token, err := svc.CreateAccessToken(7, "testuser", "test@example.com")
+	token, err := svc.CreateAccessToken(7, "test@example.com")
 	require.NoError(t, err)
 	assert.NotEmpty(t, token)
 
 	claims, err := svc.ValidateAccessToken(token)
 	require.NoError(t, err)
 	assert.Equal(t, int64(7), claims.UserID)
-	assert.Equal(t, "testuser", claims.Username)
 	assert.Equal(t, "test@example.com", claims.Email)
 }

@@ -1,4 +1,4 @@
-.PHONY: setup up down ps logs build \
+.PHONY: setup up down db-reset ps logs build \
         test test-backend test-frontend test-integration \
         clean help
 
@@ -19,14 +19,20 @@ setup:
 
 # ---- Docker Compose -------------------------------------------------------
 
-## up: start postgres + backend with docker compose
+## up: rebuild backend image and start all services
 up:
-	docker compose up -d
+	docker compose up -d --build
 	@echo "Backend → http://localhost:$$(grep BACKEND_PORT .env 2>/dev/null | cut -d= -f2 || echo 8080)"
 
 ## down: stop all services
 down:
 	docker compose down
+
+## db-reset: wipe the database volume and restart fresh
+db-reset:
+	docker compose down
+	docker volume rm cloudbackupserver_postgres_data
+	docker compose up -d --build
 
 ## ps: show running service status
 ps:
@@ -53,10 +59,15 @@ test-backend:
 test-frontend:
 	cd frontend && npm test -- --ci
 
-## test-integration: run Go integration tests (requires TEST_DATABASE_URL)
+## test-integration: start postgres if needed, then run Go integration tests
 test-integration:
-	@test -n "$(TEST_DATABASE_URL)" || (echo "Error: TEST_DATABASE_URL is not set" && exit 1)
-	TEST_DATABASE_URL=$(TEST_DATABASE_URL) cd backend && go test -v -race -tags integration ./...
+	@echo "==> Ensuring postgres is running"
+	docker compose up -d postgres
+	@echo "==> Waiting for postgres to be healthy"
+	@until docker compose exec postgres pg_isready -U cloudbackup -d cloudbackup > /dev/null 2>&1; do sleep 1; done
+	@echo "==> Running integration tests"
+	@set -a && . ./.env && set +a && \
+	cd backend && TEST_DATABASE_URL="postgres://cloudbackup:$${POSTGRES_PASSWORD:-cloudbackup_dev}@localhost:$${POSTGRES_PORT:-5432}/cloudbackup?sslmode=disable" go test -v -race -tags integration ./...
 
 # ---- Misc ----------------------------------------------------------------
 

@@ -1,6 +1,12 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 
+if (process.env.NODE_ENV === 'development') {
+  require('electron-reload')(__dirname, {
+    electron: path.join(__dirname, '..', 'node_modules', '.bin', 'electron'),
+  });
+}
+
 // In-memory token store — persists for the process lifetime.
 // Both tokens are updated together so they always stay in sync.
 let accessToken = null;

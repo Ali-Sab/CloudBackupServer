@@ -86,21 +86,21 @@ func TestIntegration_Register(t *testing.T) {
 	defer srv.Close()
 
 	resp := postJSON(t, srv.URL+"/api/auth/register",
-		`{"username":"alice","email":"alice@example.com","password":"secret123"}`)
+		`{"email":"alice@example.com","password":"secret123"}`)
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
 	var auth api.AuthResponse
 	decodeJSON(t, resp, &auth)
 	assert.NotEmpty(t, auth.AccessToken)
 	assert.NotEmpty(t, auth.RefreshToken)
-	assert.Equal(t, "alice", auth.User.Username)
+	assert.Equal(t, "alice@example.com", auth.User.Email)
 }
 
-func TestIntegration_RegisterDuplicateUsername(t *testing.T) {
+func TestIntegration_RegisterDuplicateEmail(t *testing.T) {
 	srv := setupTestServer(t)
 	defer srv.Close()
 
-	body := `{"username":"dupuser","email":"dup@example.com","password":"pass"}`
+	body := `{"email":"dup@example.com","password":"pass"}`
 	postJSON(t, srv.URL+"/api/auth/register", body)
 	resp := postJSON(t, srv.URL+"/api/auth/register", body)
 	assert.Equal(t, http.StatusConflict, resp.StatusCode)
@@ -111,10 +111,10 @@ func TestIntegration_LoginSuccess(t *testing.T) {
 	defer srv.Close()
 
 	postJSON(t, srv.URL+"/api/auth/register",
-		`{"username":"bob","email":"bob@example.com","password":"mypassword"}`)
+		`{"email":"bob@example.com","password":"mypassword"}`)
 
 	resp := postJSON(t, srv.URL+"/api/auth/login",
-		`{"username":"bob","password":"mypassword"}`)
+		`{"email":"bob@example.com","password":"mypassword"}`)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var auth api.AuthResponse
@@ -128,9 +128,9 @@ func TestIntegration_LoginWrongPassword(t *testing.T) {
 	defer srv.Close()
 
 	postJSON(t, srv.URL+"/api/auth/register",
-		`{"username":"carol","email":"carol@example.com","password":"correct"}`)
+		`{"email":"carol@example.com","password":"correct"}`)
 
-	resp := postJSON(t, srv.URL+"/api/auth/login", `{"username":"carol","password":"wrong"}`)
+	resp := postJSON(t, srv.URL+"/api/auth/login", `{"email":"carol@example.com","password":"wrong"}`)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
@@ -147,7 +147,7 @@ func TestIntegration_SessionFlow(t *testing.T) {
 
 	// Register
 	regResp := postJSON(t, srv.URL+"/api/auth/register",
-		`{"username":"dave","email":"dave@example.com","password":"pass456"}`)
+		`{"email":"dave@example.com","password":"pass456"}`)
 	var auth api.AuthResponse
 	decodeJSON(t, regResp, &auth)
 
@@ -158,7 +158,7 @@ func TestIntegration_SessionFlow(t *testing.T) {
 	decodeJSON(t, resp, &authed)
 	assert.True(t, authed.LoggedIn)
 	require.NotNil(t, authed.User)
-	assert.Equal(t, "dave", authed.User.Username)
+	assert.Equal(t, "dave@example.com", authed.User.Email)
 }
 
 func TestIntegration_RefreshTokenRotation(t *testing.T) {
@@ -167,7 +167,7 @@ func TestIntegration_RefreshTokenRotation(t *testing.T) {
 
 	// Register and get initial tokens
 	regResp := postJSON(t, srv.URL+"/api/auth/register",
-		`{"username":"eve","email":"eve@example.com","password":"pass"}`)
+		`{"email":"eve@example.com","password":"pass"}`)
 	var auth api.AuthResponse
 	decodeJSON(t, regResp, &auth)
 	require.NotEmpty(t, auth.RefreshToken)
@@ -181,8 +181,8 @@ func TestIntegration_RefreshTokenRotation(t *testing.T) {
 	decodeJSON(t, refreshResp, &refreshed)
 	assert.NotEmpty(t, refreshed.AccessToken)
 	assert.NotEmpty(t, refreshed.RefreshToken)
-	// Tokens must be different from the originals
-	assert.NotEqual(t, auth.AccessToken, refreshed.AccessToken)
+	// Refresh token must be different (rotation). Access token may be identical
+	// if both are issued within the same second (same exp/iat), so we don't assert it.
 	assert.NotEqual(t, auth.RefreshToken, refreshed.RefreshToken)
 
 	// Old refresh token must now be rejected
@@ -197,7 +197,7 @@ func TestIntegration_TheftDetection(t *testing.T) {
 
 	// Register
 	regResp := postJSON(t, srv.URL+"/api/auth/register",
-		`{"username":"frank","email":"frank@example.com","password":"pass"}`)
+		`{"email":"frank@example.com","password":"pass"}`)
 	var auth api.AuthResponse
 	decodeJSON(t, regResp, &auth)
 	original := auth.RefreshToken
@@ -221,7 +221,7 @@ func TestIntegration_Logout(t *testing.T) {
 	defer srv.Close()
 
 	regResp := postJSON(t, srv.URL+"/api/auth/register",
-		`{"username":"grace","email":"grace@example.com","password":"pass"}`)
+		`{"email":"grace@example.com","password":"pass"}`)
 	var auth api.AuthResponse
 	decodeJSON(t, regResp, &auth)
 
@@ -246,10 +246,10 @@ func TestIntegration_ForgotAndResetPassword(t *testing.T) {
 	defer srv.Close()
 
 	postJSON(t, srv.URL+"/api/auth/register",
-		`{"username":"henry","email":"henry@example.com","password":"oldpass"}`)
+		`{"email":"henry@example.com","password":"oldpass"}`)
 
 	// Forgot password
-	fpResp := postJSON(t, srv.URL+"/api/auth/forgot-password", `{"username":"henry"}`)
+	fpResp := postJSON(t, srv.URL+"/api/auth/forgot-password", `{"email":"henry@example.com"}`)
 	assert.Equal(t, http.StatusOK, fpResp.StatusCode)
 
 	var fp api.ForgotPasswordResponse
@@ -262,11 +262,11 @@ func TestIntegration_ForgotAndResetPassword(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resetResp.StatusCode)
 
 	// Old password must no longer work
-	resp := postJSON(t, srv.URL+"/api/auth/login", `{"username":"henry","password":"oldpass"}`)
+	resp := postJSON(t, srv.URL+"/api/auth/login", `{"email":"henry@example.com","password":"oldpass"}`)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
 	// New password must work
-	resp = postJSON(t, srv.URL+"/api/auth/login", `{"username":"henry","password":"newpass"}`)
+	resp = postJSON(t, srv.URL+"/api/auth/login", `{"email":"henry@example.com","password":"newpass"}`)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
@@ -275,9 +275,9 @@ func TestIntegration_ResetTokenSingleUse(t *testing.T) {
 	defer srv.Close()
 
 	postJSON(t, srv.URL+"/api/auth/register",
-		`{"username":"iris","email":"iris@example.com","password":"pass"}`)
+		`{"email":"iris@example.com","password":"pass"}`)
 
-	fpResp := postJSON(t, srv.URL+"/api/auth/forgot-password", `{"username":"iris"}`)
+	fpResp := postJSON(t, srv.URL+"/api/auth/forgot-password", `{"email":"iris@example.com"}`)
 	var fp api.ForgotPasswordResponse
 	decodeJSON(t, fpResp, &fp)
 
@@ -295,8 +295,8 @@ func TestIntegration_ForgotPasswordUnknownUser(t *testing.T) {
 	srv := setupTestServer(t)
 	defer srv.Close()
 
-	// Unknown username — must return 200 with no reset_token (prevents enumeration)
-	resp := postJSON(t, srv.URL+"/api/auth/forgot-password", `{"username":"nobody"}`)
+	// Unknown email — must return 200 with no reset_token (prevents enumeration)
+	resp := postJSON(t, srv.URL+"/api/auth/forgot-password", `{"email":"nobody@example.com"}`)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var fp api.ForgotPasswordResponse

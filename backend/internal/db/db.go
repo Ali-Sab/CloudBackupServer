@@ -53,10 +53,10 @@ func RunMigrations(databaseURL string) error {
 // CreateUser inserts a new user row and populates the generated fields (id, timestamps).
 func CreateUser(ctx context.Context, pool *pgxpool.Pool, user *models.User) error {
 	err := pool.QueryRow(ctx,
-		`INSERT INTO users (username, email, password_hash)
-		 VALUES ($1, $2, $3)
+		`INSERT INTO users (email, password_hash)
+		 VALUES ($1, $2)
 		 RETURNING id, created_at, updated_at`,
-		user.Username, user.Email, user.PasswordHash,
+		user.Email, user.PasswordHash,
 	).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("creating user: %w", err)
@@ -64,16 +64,16 @@ func CreateUser(ctx context.Context, pool *pgxpool.Pool, user *models.User) erro
 	return nil
 }
 
-// GetUserByUsername returns the user with the given username, or an error if not found.
-func GetUserByUsername(ctx context.Context, pool *pgxpool.Pool, username string) (*models.User, error) {
+// GetUserByEmail returns the user with the given email, or an error if not found.
+func GetUserByEmail(ctx context.Context, pool *pgxpool.Pool, email string) (*models.User, error) {
 	u := &models.User{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, username, email, password_hash, created_at, updated_at
-		 FROM users WHERE username = $1`,
-		username,
-	).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.CreatedAt, &u.UpdatedAt)
+		`SELECT id, email, password_hash, created_at, updated_at
+		 FROM users WHERE email = $1`,
+		email,
+	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("getting user by username: %w", err)
+		return nil, fmt.Errorf("getting user by email: %w", err)
 	}
 	return u, nil
 }
@@ -82,10 +82,10 @@ func GetUserByUsername(ctx context.Context, pool *pgxpool.Pool, username string)
 func GetUserByID(ctx context.Context, pool *pgxpool.Pool, id int64) (*models.User, error) {
 	u := &models.User{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, username, email, password_hash, created_at, updated_at
+		`SELECT id, email, password_hash, created_at, updated_at
 		 FROM users WHERE id = $1`,
 		id,
-	).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("getting user by id: %w", err)
 	}

@@ -165,4 +165,8 @@ const APIClient = {
 
 if (typeof module !== 'undefined') {
   module.exports = { APIClient, TokenStore, AuthExpiredError, BASE_URL };
+} else if (typeof window !== 'undefined') {
+  window.APIClient = APIClient;
+  window.TokenStore = TokenStore;
+  window.AuthExpiredError = AuthExpiredError;
 }

@@ -23,9 +23,8 @@ const (
 
 // Claims holds the JWT payload for access tokens.
 type Claims struct {
-	UserID   int64  `json:"user_id"`
-	Username string `json:"username"`
-	Email    string `json:"email"`
+	UserID int64  `json:"user_id"`
+	Email  string `json:"email"`
 	jwt.RegisteredClaims
 }
 
@@ -40,11 +39,10 @@ func NewService(secret string) *Service {
 }
 
 // CreateAccessToken issues a short-lived signed JWT for the given user.
-func (s *Service) CreateAccessToken(userID int64, username, email string) (string, error) {
+func (s *Service) CreateAccessToken(userID int64, email string) (string, error) {
 	claims := Claims{
-		UserID:   userID,
-		Username: username,
-		Email:    email,
+		UserID: userID,
+		Email:  email,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(AccessTokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
