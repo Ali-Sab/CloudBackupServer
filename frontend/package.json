@@ -5,12 +5,18 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
+    "dev": "NODE_ENV=development electron .",
     "test": "jest",
     "test:watch": "jest --watch"
   },
-  "keywords": ["cloud", "backup", "electron"],
+  "keywords": [
+    "cloud",
+    "backup",
+    "electron"
+  ],
   "license": "GPL-3.0",
   "devDependencies": {
+    "electron-reload": "^2.0.0-alpha.1",
     "jest": "^29.7.0",
     "jest-environment-jsdom": "^29.7.0"
   },

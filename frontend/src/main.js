@@ -1,9 +1,16 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 
-// In-memory token store — persists for the lifetime of the process.
-// For production, consider the OS keychain via keytar.
-let authToken = null;
+if (process.env.NODE_ENV === 'development') {
+  require('electron-reload')(__dirname, {
+    electron: path.join(__dirname, '..', 'node_modules', '.bin', 'electron'),
+  });
+}
+
+// In-memory token store — persists for the process lifetime.
+// Both tokens are updated together so they always stay in sync.
+let accessToken = null;
+let refreshToken = null;
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -24,22 +31,29 @@ function createWindow() {
   }
 }
 
-// IPC: renderer retrieves the stored auth token via the preload bridge
-ipcMain.on('get-token', (event) => {
-  event.returnValue = authToken;
+// ---- IPC: token management ----
+
+ipcMain.on('get-access-token', (event) => {
+  event.returnValue = accessToken;
 });
 
-// IPC: renderer stores a new auth token
-ipcMain.on('set-token', (event, token) => {
-  authToken = token;
+ipcMain.on('get-refresh-token', (event) => {
+  event.returnValue = refreshToken;
+});
+
+ipcMain.on('set-tokens', (event, { access, refresh }) => {
+  accessToken = access;
+  refreshToken = refresh;
   event.returnValue = null;
 });
 
-// IPC: renderer clears the token on logout
-ipcMain.on('clear-token', (event) => {
-  authToken = null;
+ipcMain.on('clear-tokens', (event) => {
+  accessToken = null;
+  refreshToken = null;
   event.returnValue = null;
 });
+
+// ---- App lifecycle ----
 
 app.whenReady().then(() => {
   createWindow();
@@ -50,7 +64,6 @@ app.whenReady().then(() => {
   });
 });
 
-// Quit on all windows closed (except macOS)
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });

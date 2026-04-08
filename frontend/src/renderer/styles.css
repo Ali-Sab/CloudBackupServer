@@ -153,3 +153,26 @@ button[type="button"]:hover {
   font-size: 0.88rem;
   min-height: 1.2em;
 }
+
+/* ---- Link-style button (forgot password) ---- */
+button.link-btn {
+  background: transparent;
+  border: none;
+  color: var(--color-muted);
+  font-size: 0.85rem;
+  padding: 4px 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+button.link-btn:hover { color: var(--color-primary); }
+
+/* ---- Dev-mode notice ---- */
+.dev-note {
+  background: #2d2a1e;
+  border: 1px solid #6b5e2a;
+  border-radius: 6px;
+  color: #e0c97a;
+  font-size: 0.82rem;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+}

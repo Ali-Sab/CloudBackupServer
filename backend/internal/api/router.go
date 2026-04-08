@@ -28,6 +28,10 @@ func NewRouter(pool *pgxpool.Pool, sessionSvc *session.Service) *chi.Mux {
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/login", h.PostLogin)
 			r.Post("/register", h.PostRegister)
+			r.Post("/refresh", h.PostRefresh)
+			r.Post("/logout", h.PostLogout)
+			r.Post("/forgot-password", h.PostForgotPassword)
+			r.Post("/reset-password", h.PostResetPassword)
 		})
 	})
 

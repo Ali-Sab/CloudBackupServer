@@ -4,10 +4,25 @@ info:
   description: |
     REST API for the Cloud Backup Server.
 
-    Authentication uses JWT bearer tokens. Obtain a token via `/api/auth/login` or
-    `/api/auth/register` and include it in subsequent requests as:
-    `Authorization: Bearer <token>`
-  version: 0.1.0
+    ## Authentication
+
+    This API uses a **two-token** scheme:
+
+    - **Access token** — short-lived JWT (1 minute). Include as `Authorization: Bearer <token>`.
+    - **Refresh token** — long-lived opaque token (30 days). Sent to `/api/auth/refresh` to
+      obtain a new token pair without re-entering credentials. Only the SHA-256 hash is stored
+      in the database; the raw token is never persisted.
+
+    ### Token rotation
+    Every call to `/api/auth/refresh` issues a *new* refresh token and revokes the old one.
+    If a revoked refresh token is presented, all sessions for that user are immediately revoked
+    (theft detection).
+
+    ### Password reset (development)
+    `/api/auth/forgot-password` currently returns `reset_token` directly in the response body.
+    This is a **development convenience** — in production the token will be delivered by email
+    and omitted from the response.
+  version: 0.2.0
   license:
     name: GNU General Public License v3.0
     url: https://www.gnu.org/licenses/gpl-3.0.html
@@ -20,13 +35,12 @@ tags:
   - name: Health
     description: Server health and readiness
   - name: Auth
-    description: Authentication and session management
+    description: Authentication, session management, and password reset
 
 paths:
   /api/health:
     get:
       summary: Health check
-      description: Returns the current health status and version of the server.
       operationId: getHealth
       tags: [Health]
       responses:
@@ -38,23 +52,21 @@ paths:
                 $ref: "#/components/schemas/HealthResponse"
               example:
                 status: ok
-                version: 0.1.0
+                version: 0.2.0
 
   /api/session:
     get:
       summary: Get current session state
       description: |
-        Returns whether the caller is authenticated.
-        If a valid `Authorization: Bearer <token>` header is provided, `logged_in` is `true`
-        and the `user` field is populated. Otherwise `logged_in` is `false` and `user` is omitted.
-        This endpoint never returns an error for missing or invalid tokens — it always returns 200.
+        Returns whether the caller is authenticated. Always returns 200 — missing or
+        invalid access tokens yield `{logged_in: false}` rather than an error.
       operationId: getSession
       tags: [Auth]
       security:
         - BearerAuth: []
       responses:
         "200":
-          description: Session state (always 200, even when not authenticated)
+          description: Session state
           content:
             application/json:
               schema:
@@ -62,45 +74,16 @@ paths:
               examples:
                 loggedOut:
                   summary: Not authenticated
-                  value:
-                    logged_in: false
+                  value: {logged_in: false}
                 loggedIn:
                   summary: Authenticated
                   value:
                     logged_in: true
-                    user:
-                      id: 1
-                      username: alice
-                      email: alice@example.com
-
-  /api/auth/login:
-    post:
-      summary: Log in
-      description: Authenticates a user with username and password. Returns a JWT on success.
-      operationId: login
-      tags: [Auth]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/LoginRequest"
-      responses:
-        "200":
-          description: Login successful
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AuthResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
+                    user: {id: 1, email: alice@example.com}
 
   /api/auth/register:
     post:
-      summary: Register
-      description: Creates a new user account. Returns a JWT on success.
+      summary: Register a new user
       operationId: register
       tags: [Auth]
       requestBody:
@@ -111,7 +94,7 @@ paths:
               $ref: "#/components/schemas/RegisterRequest"
       responses:
         "201":
-          description: Registration successful
+          description: Registration successful — returns token pair
           content:
             application/json:
               schema:
@@ -121,12 +104,145 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
 
+  /api/auth/login:
+    post:
+      summary: Log in with email and password
+      operationId: login
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login successful — returns token pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/auth/refresh:
+    post:
+      summary: Rotate the refresh token and obtain a new token pair
+      description: |
+        Accepts a valid refresh token and returns a new access token and refresh token.
+        The old refresh token is immediately revoked (rotation).
+
+        **Theft detection**: if a previously-revoked refresh token is presented, all active
+        sessions for that user are revoked.
+      operationId: refreshTokens
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: New token pair issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/auth/logout:
+    post:
+      summary: Revoke the provided refresh token
+      description: |
+        Revokes a specific refresh token. Idempotent — succeeds even if the token is
+        already revoked or not found.
+
+        The access token is intentionally not required — this allows logout even when
+        the access token has already expired.
+      operationId: logout
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogoutRequest"
+      responses:
+        "204":
+          description: Logged out (refresh token revoked)
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/auth/forgot-password:
+    post:
+      summary: Request a password reset token
+      description: |
+        Generates a single-use password reset token (1 hour TTL).
+
+        The response deliberately looks identical whether or not the email exists,
+        to prevent email enumeration.
+
+        **Development only**: `reset_token` is currently returned in the response body.
+        In production this field will be removed and the token delivered by email.
+      operationId: forgotPassword
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForgotPasswordRequest"
+      responses:
+        "200":
+          description: Reset token issued (or email not found — response is the same)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForgotPasswordResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/auth/reset-password:
+    post:
+      summary: Reset password using a reset token
+      description: |
+        Validates the reset token, updates the user's password, marks the token as used,
+        and revokes all active refresh tokens for that user (forcing re-login everywhere).
+      operationId: resetPassword
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetPasswordRequest"
+      responses:
+        "200":
+          description: Password updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Password updated successfully. Please log in again."
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
 components:
   securitySchemes:
     BearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+      description: Short-lived access token (1 minute TTL)
 
   schemas:
     HealthResponse:
@@ -138,7 +254,7 @@ components:
           example: ok
         version:
           type: string
-          example: 0.1.0
+          example: 0.2.0
 
     SessionResponse:
       type: object
@@ -152,58 +268,117 @@ components:
 
     UserInfo:
       type: object
-      required: [id, username, email]
+      required: [id, email]
       properties:
         id:
           type: integer
           format: int64
           example: 1
-        username:
-          type: string
-          example: alice
         email:
           type: string
           format: email
           example: alice@example.com
-
-    LoginRequest:
-      type: object
-      required: [username, password]
-      properties:
-        username:
-          type: string
-          example: alice
-        password:
-          type: string
-          format: password
-          example: "hunter2"
-
-    RegisterRequest:
-      type: object
-      required: [username, email, password]
-      properties:
-        username:
-          type: string
-          example: alice
-        email:
-          type: string
-          format: email
-          example: alice@example.com
-        password:
-          type: string
-          format: password
-          example: "hunter2"
 
     AuthResponse:
       type: object
-      required: [token, user]
+      required: [access_token, refresh_token, user]
       properties:
-        token:
+        access_token:
           type: string
-          description: JWT bearer token (expires in 24 h)
+          description: JWT access token (expires in 1 minute)
           example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        refresh_token:
+          type: string
+          description: Opaque refresh token (expires in 30 days)
+          example: dGhpcyBpcyBhIHJhbmRvbSB0b2tlbg==
         user:
           $ref: "#/components/schemas/UserInfo"
+
+    RefreshResponse:
+      type: object
+      required: [access_token, refresh_token, user]
+      properties:
+        access_token:
+          type: string
+          description: New JWT access token (expires in 1 minute)
+        refresh_token:
+          type: string
+          description: New opaque refresh token (expires in 30 days; old token revoked)
+        user:
+          $ref: "#/components/schemas/UserInfo"
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        password:
+          type: string
+          format: password
+
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        password:
+          type: string
+          format: password
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: The opaque refresh token previously issued by login or register
+
+    LogoutRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: The refresh token to revoke
+
+    ForgotPasswordRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+
+    ForgotPasswordResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          example: "If the account exists, a reset token has been issued."
+        reset_token:
+          type: string
+          description: "DEV ONLY — will be removed when email delivery is added"
+          example: dGhpcyBpcyBhIHJhbmRvbSB0b2tlbg==
+        _dev_note:
+          type: string
+
+    ResetPasswordRequest:
+      type: object
+      required: [reset_token, new_password]
+      properties:
+        reset_token:
+          type: string
+        new_password:
+          type: string
+          format: password
 
     ErrorResponse:
       type: object
@@ -221,13 +396,13 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Unauthorized:
-      description: Authentication failed (wrong credentials)
+      description: Authentication failed
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Conflict:
-      description: Resource already exists (duplicate username or email)
+      description: Resource already exists (duplicate email)
       content:
         application/json:
           schema:
