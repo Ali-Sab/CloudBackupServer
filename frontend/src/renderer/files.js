@@ -265,9 +265,22 @@
 
   // ---- Navigation ---------------------------------------------------------
 
-  /** Drill into a directory — push it onto viewStack and re-render. */
+  /**
+   * Drill into a directory — set viewStack to the full path from root and re-render.
+   *
+   * We rebuild the full stack from relativePath rather than just pushing the
+   * entry, so that clicking a folder that is visible inside an expanded
+   * parent (without having navigated into the parent first) correctly lands
+   * at the right depth instead of falling back to root.
+   */
   function navigateInto(entry) {
-    viewStack.push({ name: entry.name, relativePath: entry.relativePath });
+    const parts = entry.relativePath.split('/');
+    viewStack = [];
+    let relPath = '';
+    for (const part of parts) {
+      relPath = relPath ? relPath + '/' + part : part;
+      viewStack.push({ name: part, relativePath: relPath });
+    }
     renderView();
   }
 
@@ -433,12 +446,6 @@
     if (name.length <= max) return escapeHtml(name);
     const half = Math.floor((max - 1) / 2);
     return escapeHtml(name.slice(0, half)) + '…' + escapeHtml(name.slice(-half));
-  }
-
-  function escapeHtml(str) {
-    const div = document.createElement('div');
-    div.appendChild(document.createTextNode(String(str)));
-    return div.innerHTML;
   }
 
   function formatSize(bytes) {

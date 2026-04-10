@@ -13,6 +13,15 @@ const BASE_URL = (typeof process !== 'undefined' && process.env.API_BASE_URL)
   ? process.env.API_BASE_URL
   : 'http://localhost:8080';
 
+// ---- Utilities -----------------------------------------------------------
+
+/** XSS-safe HTML escaping. Canonical definition — shared by auth.js and files.js. */
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.appendChild(document.createTextNode(String(str)));
+  return div.innerHTML;
+}
+
 // ---- Token storage -------------------------------------------------------
 
 /**
@@ -39,8 +48,7 @@ const TokenStore = {
   store(accessToken, refreshToken) {
     if (typeof window !== 'undefined' && window.electronAPI) {
       window.electronAPI.setTokens(accessToken, refreshToken);
-    }
-    if (typeof localStorage !== 'undefined') {
+    } else if (typeof localStorage !== 'undefined') {
       localStorage.setItem('access_token', accessToken);
       localStorage.setItem('refresh_token', refreshToken);
     }
@@ -49,8 +57,7 @@ const TokenStore = {
   clear() {
     if (typeof window !== 'undefined' && window.electronAPI) {
       window.electronAPI.clearTokens();
-    }
-    if (typeof localStorage !== 'undefined') {
+    } else if (typeof localStorage !== 'undefined') {
       localStorage.removeItem('access_token');
       localStorage.removeItem('refresh_token');
     }
@@ -178,9 +185,10 @@ const APIClient = {
 // ---- Exports -------------------------------------------------------------
 
 if (typeof module !== 'undefined') {
-  module.exports = { APIClient, TokenStore, AuthExpiredError, BASE_URL };
+  module.exports = { APIClient, TokenStore, AuthExpiredError, escapeHtml };
 } else if (typeof window !== 'undefined') {
   window.APIClient = APIClient;
   window.TokenStore = TokenStore;
   window.AuthExpiredError = AuthExpiredError;
+  window.escapeHtml = escapeHtml;
 }

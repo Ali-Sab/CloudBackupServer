@@ -16,6 +16,7 @@
     : null;
   const TokenStore       = _mod ? _mod.TokenStore       : window.TokenStore;
   const AuthExpiredError = _mod ? _mod.AuthExpiredError : window.AuthExpiredError;
+  const escapeHtml       = _mod ? _mod.escapeHtml       : window.escapeHtml;
 
   const _apiMod = (typeof require !== 'undefined' && typeof module !== 'undefined')
     ? require('./api')
@@ -34,13 +35,6 @@
       return { type: 'logged-in', email: data.user.email };
     }
     return { type: 'logged-out' };
-  }
-
-  /** XSS-safe HTML escaping. */
-  function escapeHtml(str) {
-    const div = document.createElement('div');
-    div.appendChild(document.createTextNode(String(str)));
-    return div.innerHTML;
   }
 
   // ---- DOM interaction ----------------------------------------------------
@@ -75,8 +69,11 @@
       el.innerHTML = `
         <h2>Connection Error</h2>
         <p>Could not reach the server. Make sure the backend is running.</p>
-        <button onclick="window.Auth.checkSession()">Retry</button>
       `;
+      const btn = document.createElement('button');
+      btn.textContent = 'Retry';
+      btn.addEventListener('click', checkSession);
+      el.appendChild(btn);
     }
 
     // -- State rendering -----------------------------------------------------
@@ -133,11 +130,13 @@
 
       try {
         const resp = await API.login(email, password);
-        const data = await resp.json();
         if (!resp.ok) {
-          errorEl.textContent = data.error || 'Login failed';
+          let msg = 'Login failed';
+          try { msg = (await resp.json()).error || msg; } catch {}
+          errorEl.textContent = msg;
           return;
         }
+        const data = await resp.json();
         TokenStore.store(data.access_token, data.refresh_token);
         checkSession();
       } catch {
@@ -172,11 +171,13 @@
 
       try {
         const resp = await API.register(email, password);
-        const data = await resp.json();
         if (!resp.ok) {
-          errorEl.textContent = data.error || 'Registration failed';
+          let msg = 'Registration failed';
+          try { msg = (await resp.json()).error || msg; } catch {}
+          errorEl.textContent = msg;
           return;
         }
+        const data = await resp.json();
         TokenStore.store(data.access_token, data.refresh_token);
         checkSession();
       } catch {
@@ -210,11 +211,13 @@
 
       try {
         const resp = await API.forgotPassword(email);
-        const data = await resp.json();
         if (!resp.ok) {
-          errorEl.textContent = data.error || 'Request failed';
+          let msg = 'Request failed';
+          try { msg = (await resp.json()).error || msg; } catch {}
+          errorEl.textContent = msg;
           return;
         }
+        const data = await resp.json();
         renderResetPasswordForm(el, data.reset_token || '');
       } catch {
         errorEl.textContent = 'Connection error — please try again.';
@@ -260,9 +263,10 @@
 
       try {
         const resp = await API.resetPassword(resetToken, newPassword);
-        const data = await resp.json();
         if (!resp.ok) {
-          errorEl.textContent = data.error || 'Reset failed';
+          let msg = 'Reset failed';
+          try { msg = (await resp.json()).error || msg; } catch {}
+          errorEl.textContent = msg;
           return;
         }
         TokenStore.clear();
@@ -295,7 +299,7 @@
   // ---- Exports (for Jest) -------------------------------------------------
 
   if (typeof module !== 'undefined') {
-    module.exports = { renderSessionState, escapeHtml };
+    module.exports = { renderSessionState };
   }
 
 })();
