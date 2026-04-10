@@ -38,7 +38,7 @@ func setupTestServer(t *testing.T) *httptest.Server {
 
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(),
-			"TRUNCATE password_reset_tokens, refresh_tokens, users RESTART IDENTITY CASCADE")
+			"TRUNCATE watched_files, watched_paths, password_reset_tokens, refresh_tokens, users RESTART IDENTITY CASCADE")
 		pool.Close()
 	})
 
@@ -68,6 +68,27 @@ func authGet(t *testing.T, url, token string) *http.Response {
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	return resp
+}
+
+func authPut(t *testing.T, url, token, body string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPut, url, bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
+// registerAndLogin is a convenience helper that registers a user and returns their access token.
+func registerAndLogin(t *testing.T, srv *httptest.Server, email, password string) string {
+	t.Helper()
+	resp := postJSON(t, srv.URL+"/api/auth/register",
+		fmt.Sprintf(`{"email":%q,"password":%q}`, email, password))
+	var auth api.AuthResponse
+	decodeJSON(t, resp, &auth)
+	require.NotEmpty(t, auth.AccessToken, "registration must return an access token")
+	return auth.AccessToken
 }
 
 // ---- tests ----
@@ -303,4 +324,269 @@ func TestIntegration_ForgotPasswordUnknownUser(t *testing.T) {
 	decodeJSON(t, resp, &fp)
 	assert.Empty(t, fp.ResetToken)
 	assert.NotEmpty(t, fp.Message)
+}
+
+// ---- File endpoint integration tests ----
+
+func TestIntegration_FilesEndpoints_RequireAuth(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/api/files/path", ""},
+		{http.MethodPut, "/api/files/path", `{"path":"/tmp"}`},
+		{http.MethodGet, "/api/files/", ""},
+		{http.MethodPut, "/api/files/sync", `{"files":[]}`},
+	} {
+		var req *http.Request
+		if tc.body != "" {
+			req, _ = http.NewRequest(tc.method, srv.URL+tc.path, bytes.NewBufferString(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+		} else {
+			req, _ = http.NewRequest(tc.method, srv.URL+tc.path, nil)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "%s %s", tc.method, tc.path)
+	}
+}
+
+func TestIntegration_WatchedPath_SetAndGet(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv, "path-user@example.com", "pass")
+
+	// GET before any path is set → 404
+	resp := authGet(t, srv.URL+"/api/files/path", token)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	// PUT a path
+	resp = authPut(t, srv.URL+"/api/files/path", token, `{"path":"/home/user/documents"}`)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var wp api.WatchedPathResponse
+	decodeJSON(t, resp, &wp)
+	assert.Equal(t, "/home/user/documents", wp.Path)
+	assert.NotZero(t, wp.ID)
+
+	// GET now returns the saved path
+	resp = authGet(t, srv.URL+"/api/files/path", token)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var got api.WatchedPathResponse
+	decodeJSON(t, resp, &got)
+	assert.Equal(t, "/home/user/documents", got.Path)
+}
+
+func TestIntegration_WatchedPath_Upsert(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv, "upsert-user@example.com", "pass")
+
+	authPut(t, srv.URL+"/api/files/path", token, `{"path":"/old/path"}`)
+	resp := authPut(t, srv.URL+"/api/files/path", token, `{"path":"/new/path"}`)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var wp api.WatchedPathResponse
+	decodeJSON(t, resp, &wp)
+	assert.Equal(t, "/new/path", wp.Path)
+
+	// GET must return the updated path, not both
+	resp = authGet(t, srv.URL+"/api/files/path", token)
+	var got api.WatchedPathResponse
+	decodeJSON(t, resp, &got)
+	assert.Equal(t, "/new/path", got.Path)
+}
+
+func TestIntegration_WatchedPath_MissingPath(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv, "nopath-user@example.com", "pass")
+
+	resp := authPut(t, srv.URL+"/api/files/path", token, `{"path":""}`)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestIntegration_SyncFiles_NoPath(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv, "syncnopath@example.com", "pass")
+
+	// Sync without setting a path first → 404
+	resp := authPut(t, srv.URL+"/api/files/sync", token, `{"files":[]}`)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestIntegration_SyncAndGetFiles(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv, "sync-user@example.com", "pass")
+
+	// Set a watched path first
+	authPut(t, srv.URL+"/api/files/path", token, `{"path":"/home/user/backups"}`)
+
+	// GET files before any sync → empty list
+	resp := authGet(t, srv.URL+"/api/files/", token)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var empty api.WatchedFilesResponse
+	decodeJSON(t, resp, &empty)
+	assert.Empty(t, empty.Files)
+
+	// Sync a set of files (include relative_path)
+	syncBody := `{"files":[
+		{"name":"notes.txt","relative_path":"notes.txt","is_directory":false,"size":1024,"modified_ms":1700000000000},
+		{"name":"photos","relative_path":"photos","is_directory":true,"size":0,"modified_ms":1700000001000}
+	]}`
+	resp = authPut(t, srv.URL+"/api/files/sync", token, syncBody)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// GET files → ordered by relative_path ASC
+	resp = authGet(t, srv.URL+"/api/files/", token)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var files api.WatchedFilesResponse
+	decodeJSON(t, resp, &files)
+	require.Len(t, files.Files, 2)
+	// relative_path ASC: "notes.txt" < "photos"
+	assert.Equal(t, "notes.txt", files.Files[0].Name)
+	assert.Equal(t, "notes.txt", files.Files[0].RelativePath)
+	assert.Equal(t, int64(1024), files.Files[0].Size)
+	assert.Equal(t, "photos", files.Files[1].Name)
+	assert.True(t, files.Files[1].IsDirectory)
+
+	// Re-sync with different files — must replace, not append
+	resp = authPut(t, srv.URL+"/api/files/sync", token, `{"files":[
+		{"name":"archive.zip","relative_path":"archive.zip","is_directory":false,"size":4096,"modified_ms":1700000002000}
+	]}`)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	resp = authGet(t, srv.URL+"/api/files/", token)
+	var replaced api.WatchedFilesResponse
+	decodeJSON(t, resp, &replaced)
+	require.Len(t, replaced.Files, 1)
+	assert.Equal(t, "archive.zip", replaced.Files[0].Name)
+}
+
+func TestIntegration_SyncFiles_WithRelativePath(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv, "relpath@example.com", "pass")
+	authPut(t, srv.URL+"/api/files/path", token, `{"path":"/home/user/docs"}`)
+
+	// Sync a tree: root file, a subdirectory, and a file inside that subdirectory
+	syncBody := `{"files":[
+		{"name":"readme.txt","relative_path":"readme.txt","is_directory":false,"size":512,"modified_ms":1000},
+		{"name":"src","relative_path":"src","is_directory":true,"size":0,"modified_ms":2000},
+		{"name":"main.go","relative_path":"src/main.go","is_directory":false,"size":2048,"modified_ms":3000}
+	]}`
+	resp := authPut(t, srv.URL+"/api/files/sync", token, syncBody)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	resp = authGet(t, srv.URL+"/api/files/", token)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var result api.WatchedFilesResponse
+	decodeJSON(t, resp, &result)
+	require.Len(t, result.Files, 3)
+
+	// Index by relative_path for easy assertion
+	byPath := make(map[string]string) // relative_path → name
+	bySize := make(map[string]int64)
+	byIsDir := make(map[string]bool)
+	for _, f := range result.Files {
+		byPath[f.RelativePath] = f.Name
+		bySize[f.RelativePath] = f.Size
+		byIsDir[f.RelativePath] = f.IsDirectory
+	}
+	assert.Equal(t, "readme.txt", byPath["readme.txt"])
+	assert.Equal(t, "src", byPath["src"])
+	assert.True(t, byIsDir["src"])
+	assert.Equal(t, "main.go", byPath["src/main.go"])
+	assert.Equal(t, int64(2048), bySize["src/main.go"])
+}
+
+func TestIntegration_SyncFiles_RelativePathOrdering(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv, "ordering@example.com", "pass")
+	authPut(t, srv.URL+"/api/files/path", token, `{"path":"/home/user/project"}`)
+
+	// Sync entries that should come back in relative_path ASC order
+	syncBody := `{"files":[
+		{"name":"z.txt","relative_path":"z.txt","is_directory":false,"size":1,"modified_ms":0},
+		{"name":"a","relative_path":"a","is_directory":true,"size":0,"modified_ms":0},
+		{"name":"b.txt","relative_path":"a/b.txt","is_directory":false,"size":1,"modified_ms":0},
+		{"name":"c.txt","relative_path":"c.txt","is_directory":false,"size":1,"modified_ms":0}
+	]}`
+	authPut(t, srv.URL+"/api/files/sync", token, syncBody)
+
+	resp := authGet(t, srv.URL+"/api/files/", token)
+	var result api.WatchedFilesResponse
+	decodeJSON(t, resp, &result)
+	require.Len(t, result.Files, 4)
+
+	// Expected order: "a" < "a/b.txt" < "c.txt" < "z.txt" (lexicographic relative_path ASC)
+	assert.Equal(t, "a", result.Files[0].RelativePath)
+	assert.Equal(t, "a/b.txt", result.Files[1].RelativePath)
+	assert.Equal(t, "c.txt", result.Files[2].RelativePath)
+	assert.Equal(t, "z.txt", result.Files[3].RelativePath)
+}
+
+func TestIntegration_ChangingPathClearsFiles(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv, "pathchange@example.com", "pass")
+
+	// Set path and sync some files
+	authPut(t, srv.URL+"/api/files/path", token, `{"path":"/old/path"}`)
+	authPut(t, srv.URL+"/api/files/sync", token, `{"files":[
+		{"name":"old-file.txt","is_directory":false,"size":100,"modified_ms":0}
+	]}`)
+
+	// Verify files exist
+	resp := authGet(t, srv.URL+"/api/files/", token)
+	var before api.WatchedFilesResponse
+	decodeJSON(t, resp, &before)
+	require.Len(t, before.Files, 1)
+
+	// Change the path
+	resp = authPut(t, srv.URL+"/api/files/path", token, `{"path":"/new/path"}`)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var wp api.WatchedPathResponse
+	decodeJSON(t, resp, &wp)
+	assert.Equal(t, "/new/path", wp.Path)
+
+	// File list must now be empty — stale files cleared automatically
+	resp = authGet(t, srv.URL+"/api/files/", token)
+	var after api.WatchedFilesResponse
+	decodeJSON(t, resp, &after)
+	assert.Empty(t, after.Files, "changing the watched path must clear the stale file list")
+}
+
+func TestIntegration_FilesIsolatedPerUser(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	tokenA := registerAndLogin(t, srv, "user-a@example.com", "pass")
+	tokenB := registerAndLogin(t, srv, "user-b@example.com", "pass")
+
+	// User A sets a path and syncs a file
+	authPut(t, srv.URL+"/api/files/path", tokenA, `{"path":"/a/path"}`)
+	authPut(t, srv.URL+"/api/files/sync", tokenA, `{"files":[{"name":"a.txt","relative_path":"a.txt","is_directory":false,"size":1,"modified_ms":0}]}`)
+
+	// User B has no path set
+	resp := authGet(t, srv.URL+"/api/files/path", tokenB)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	// User B cannot see user A's files
+	resp = authGet(t, srv.URL+"/api/files/", tokenB)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }

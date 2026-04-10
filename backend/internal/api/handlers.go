@@ -105,6 +105,39 @@ type ResetPasswordRequest struct {
 	NewPassword string `json:"new_password"`
 }
 
+// SetWatchedPathRequest is the body expected by PUT /api/files/path.
+type SetWatchedPathRequest struct {
+	Path string `json:"path"`
+}
+
+// WatchedPathResponse is returned by GET and PUT /api/files/path.
+type WatchedPathResponse struct {
+	ID        int64     `json:"id"`
+	Path      string    `json:"path"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// FileEntry describes a single file or directory sent by the client.
+// RelativePath is the POSIX path relative to the watched root (e.g. "photos/2024/img.jpg").
+// Top-level entries have RelativePath equal to Name.
+type FileEntry struct {
+	Name         string `json:"name"`
+	RelativePath string `json:"relative_path"`
+	IsDirectory  bool   `json:"is_directory"`
+	Size         int64  `json:"size"`
+	ModifiedMs   int64  `json:"modified_ms"`
+}
+
+// SyncWatchedFilesRequest is the body expected by PUT /api/files/sync.
+type SyncWatchedFilesRequest struct {
+	Files []FileEntry `json:"files"`
+}
+
+// WatchedFilesResponse is returned by GET /api/files.
+type WatchedFilesResponse struct {
+	Files []models.WatchedFile `json:"files"`
+}
+
 // ---- Handlers ----
 
 // GetHealth handles GET /api/health.
@@ -370,6 +403,100 @@ func (h *Handler) PostResetPassword(w http.ResponseWriter, r *http.Request) {
 	_ = db.RevokeAllUserRefreshTokens(r.Context(), h.db, prt.UserID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Password updated successfully. Please log in again."})
+}
+
+// ---- File handlers ----
+
+// GetWatchedPath handles GET /api/files/path.
+// Returns the authenticated user's saved watched directory path, or 404 if none set.
+func (h *Handler) GetWatchedPath(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+	wp, err := db.GetWatchedPathByUserID(r.Context(), h.db, userID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no watched path set"})
+		return
+	}
+	writeJSON(w, http.StatusOK, WatchedPathResponse{ID: wp.ID, Path: wp.Path, UpdatedAt: wp.UpdatedAt})
+}
+
+// PutWatchedPath handles PUT /api/files/path.
+// Creates or replaces the authenticated user's watched directory path.
+func (h *Handler) PutWatchedPath(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+
+	var req SetWatchedPathRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+		return
+	}
+	if req.Path == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "path is required"})
+		return
+	}
+
+	wp, err := db.SetWatchedPath(r.Context(), h.db, userID, req.Path)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to save path"})
+		return
+	}
+	writeJSON(w, http.StatusOK, WatchedPathResponse{ID: wp.ID, Path: wp.Path, UpdatedAt: wp.UpdatedAt})
+}
+
+// GetFiles handles GET /api/files.
+// Returns the stored file list for the authenticated user's watched path.
+func (h *Handler) GetFiles(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+
+	wp, err := db.GetWatchedPathByUserID(r.Context(), h.db, userID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no watched path set"})
+		return
+	}
+
+	files, err := db.GetWatchedFiles(r.Context(), h.db, wp.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve files"})
+		return
+	}
+	writeJSON(w, http.StatusOK, WatchedFilesResponse{Files: files})
+}
+
+// PutSyncFiles handles PUT /api/files/sync.
+// Atomically replaces the stored file list for the user's watched path.
+func (h *Handler) PutSyncFiles(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+
+	var req SyncWatchedFilesRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+		return
+	}
+	if req.Files == nil {
+		req.Files = []FileEntry{}
+	}
+
+	wp, err := db.GetWatchedPathByUserID(r.Context(), h.db, userID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no watched path set — call PUT /api/files/path first"})
+		return
+	}
+
+	watchedFiles := make([]models.WatchedFile, len(req.Files))
+	for i, f := range req.Files {
+		watchedFiles[i] = models.WatchedFile{
+			Name:         f.Name,
+			RelativePath: f.RelativePath,
+			IsDirectory:  f.IsDirectory,
+			Size:         f.Size,
+			ModifiedMs:   f.ModifiedMs,
+		}
+	}
+
+	if err := db.SyncWatchedFiles(r.Context(), h.db, wp.ID, watchedFiles); err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to sync files"})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---- Helpers ----

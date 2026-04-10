@@ -33,6 +33,14 @@ func NewRouter(pool *pgxpool.Pool, sessionSvc *session.Service) *chi.Mux {
 			r.Post("/forgot-password", h.PostForgotPassword)
 			r.Post("/reset-password", h.PostResetPassword)
 		})
+
+		r.Route("/files", func(r chi.Router) {
+			r.Use(h.requireAuth)
+			r.Get("/path", h.GetWatchedPath)
+			r.Put("/path", h.PutWatchedPath)
+			r.Get("/", h.GetFiles)
+			r.Put("/sync", h.PutSyncFiles)
+		})
 	})
 
 	return r

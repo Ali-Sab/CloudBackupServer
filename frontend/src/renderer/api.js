@@ -50,11 +50,30 @@
       });
     },
 
-    // ---- Files (add when backend routes exist) ----
-    // listFiles()           { return APIClient.request('/api/files'); },
-    // uploadFile(formData)  { return APIClient.request('/api/files', { method: 'POST', body: formData }); },
-    // downloadFile(fileId)  { return APIClient.request(`/api/files/${fileId}`); },
-    // deleteFile(fileId)    { return APIClient.request(`/api/files/${fileId}`, { method: 'DELETE' }); },
+    // ---- Files ----
+
+    /** Returns { id, path, updated_at } or null if no path is saved. */
+    getWatchedPath() {
+      return APIClient.request('/api/files/path');
+    },
+
+    /** Sets/replaces the watched path. Body: { path }. Returns { id, path, updated_at }. */
+    setWatchedPath(path) {
+      return APIClient.put('/api/files/path', { path });
+    },
+
+    /** Returns { files: [...] } — the last-synced file list. */
+    getFiles() {
+      return APIClient.request('/api/files/');
+    },
+
+    /**
+     * Atomically replaces the stored file list.
+     * @param {Array<{name, is_directory, size, modified_ms}>} files
+     */
+    syncFiles(files) {
+      return APIClient.put('/api/files/sync', { files });
+    },
   };
 
   if (typeof module !== 'undefined') {

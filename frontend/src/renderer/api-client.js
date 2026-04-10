@@ -147,6 +147,20 @@ const APIClient = {
     });
   },
 
+  /**
+   * Make an authenticated PUT with a JSON body.
+   *
+   * @param {string} path
+   * @param {object} body - will be JSON-serialised
+   * @returns {Promise<Response>}
+   */
+  async put(path, body) {
+    return this.request(path, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+  },
+
   // Internal: raw request with Authorization header injected.
   async _doRequest(path, options = {}) {
     const accessToken = TokenStore.getAccessToken();

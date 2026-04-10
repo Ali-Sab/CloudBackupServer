@@ -90,7 +90,9 @@
           <button id="logout-btn">Sign Out</button>
         `;
         document.getElementById('logout-btn').addEventListener('click', logout);
+        window.Files.show();
       } else {
+        window.Files.hide();
         renderLoginForm(el);
       }
     }

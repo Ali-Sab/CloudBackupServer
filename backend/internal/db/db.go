@@ -196,3 +196,126 @@ func MarkPasswordResetTokenUsed(ctx context.Context, pool *pgxpool.Pool, id int6
 	}
 	return nil
 }
+
+// ---- Watched paths ----
+
+// SetWatchedPath upserts the user's watched directory path.
+// Each user may have at most one watched path; this replaces it if it already exists.
+// If the path changes, the stale file list is cleared atomically in the same transaction.
+func SetWatchedPath(ctx context.Context, pool *pgxpool.Pool, userID int64, path string) (*models.WatchedPath, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Snapshot the existing path (if any) before the upsert.
+	var oldPathID int64
+	var oldPath string
+	hadExisting := true
+	if err := tx.QueryRow(ctx,
+		`SELECT id, path FROM watched_paths WHERE user_id = $1`, userID,
+	).Scan(&oldPathID, &oldPath); err != nil {
+		hadExisting = false
+	}
+
+	wp := &models.WatchedPath{}
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO watched_paths (user_id, path)
+		 VALUES ($1, $2)
+		 ON CONFLICT (user_id) DO UPDATE
+		   SET path = EXCLUDED.path, updated_at = NOW()
+		 RETURNING id, user_id, path, created_at, updated_at`,
+		userID, path,
+	).Scan(&wp.ID, &wp.UserID, &wp.Path, &wp.CreatedAt, &wp.UpdatedAt); err != nil {
+		return nil, fmt.Errorf("setting watched path: %w", err)
+	}
+
+	// Clear the file list when the path changes — the old files describe a different directory.
+	if hadExisting && oldPath != path {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM watched_files WHERE path_id = $1`, oldPathID,
+		); err != nil {
+			return nil, fmt.Errorf("clearing stale watched files: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing watched path: %w", err)
+	}
+	return wp, nil
+}
+
+// GetWatchedPathByUserID returns the user's watched path, or an error if none is set.
+func GetWatchedPathByUserID(ctx context.Context, pool *pgxpool.Pool, userID int64) (*models.WatchedPath, error) {
+	wp := &models.WatchedPath{}
+	err := pool.QueryRow(ctx,
+		`SELECT id, user_id, path, created_at, updated_at
+		 FROM watched_paths WHERE user_id = $1`,
+		userID,
+	).Scan(&wp.ID, &wp.UserID, &wp.Path, &wp.CreatedAt, &wp.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("getting watched path: %w", err)
+	}
+	return wp, nil
+}
+
+// ---- Watched files ----
+
+// SyncWatchedFiles replaces all file entries for a watched path in a single transaction.
+// The incoming slice is the complete current state of the directory.
+func SyncWatchedFiles(ctx context.Context, pool *pgxpool.Pool, pathID int64, files []models.WatchedFile) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if _, err := tx.Exec(ctx, `DELETE FROM watched_files WHERE path_id = $1`, pathID); err != nil {
+		return fmt.Errorf("clearing watched files: %w", err)
+	}
+
+	for _, f := range files {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO watched_files (path_id, name, relative_path, is_directory, size, modified_ms)
+			 VALUES ($1, $2, $3, $4, $5, $6)`,
+			pathID, f.Name, f.RelativePath, f.IsDirectory, f.Size, f.ModifiedMs,
+		); err != nil {
+			return fmt.Errorf("inserting watched file: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing watched files: %w", err)
+	}
+	return nil
+}
+
+// GetWatchedFiles returns all file entries for the given watched path.
+// Results are ordered by relative_path ASC, which gives natural tree order
+// (e.g. "a/", "a/b.txt", "c.txt").
+func GetWatchedFiles(ctx context.Context, pool *pgxpool.Pool, pathID int64) ([]models.WatchedFile, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT id, path_id, name, relative_path, is_directory, size, modified_ms, created_at
+		 FROM watched_files WHERE path_id = $1
+		 ORDER BY relative_path ASC`,
+		pathID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying watched files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []models.WatchedFile
+	for rows.Next() {
+		var f models.WatchedFile
+		if err := rows.Scan(&f.ID, &f.PathID, &f.Name, &f.RelativePath, &f.IsDirectory, &f.Size, &f.ModifiedMs, &f.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scanning watched file: %w", err)
+		}
+		files = append(files, f)
+	}
+	if files == nil {
+		files = []models.WatchedFile{}
+	}
+	return files, rows.Err()
+}
