@@ -36,6 +36,8 @@ tags:
     description: Server health and readiness
   - name: Auth
     description: Authentication, session management, and password reset
+  - name: Files
+    description: Watched directory path and file list management (requires auth)
 
 paths:
   /api/health:
@@ -236,6 +238,101 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
 
+  /api/files/path:
+    get:
+      summary: Get the user's watched directory path
+      description: Returns the authenticated user's saved watched directory path.
+      operationId: getWatchedPath
+      tags: [Files]
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Watched path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WatchedPathResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      summary: Set or update the user's watched directory path
+      description: |
+        Creates or replaces the authenticated user's watched directory path.
+        Each user has at most one watched path — this upserts it.
+      operationId: setWatchedPath
+      tags: [Files]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetWatchedPathRequest"
+      responses:
+        "200":
+          description: Watched path saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WatchedPathResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/files/:
+    get:
+      summary: Get the stored file list for the user's watched path
+      description: |
+        Returns all files and directories last synced for the user's watched path.
+        Returns 404 if no watched path has been set.
+      operationId: getFiles
+      tags: [Files]
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Stored file list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WatchedFilesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/files/sync:
+    put:
+      summary: Replace the stored file list
+      description: |
+        Atomically replaces the entire stored file list for the user's watched path.
+        The incoming `files` array is the complete current state of the directory —
+        not a delta. Returns 404 if no watched path has been set.
+      operationId: syncFiles
+      tags: [Files]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncWatchedFilesRequest"
+      responses:
+        "204":
+          description: File list replaced successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
 components:
   securitySchemes:
     BearerAuth:
@@ -380,6 +477,90 @@ components:
           type: string
           format: password
 
+    SetWatchedPathRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: Absolute path to the local directory to watch
+          example: /home/user/documents
+
+    WatchedPathResponse:
+      type: object
+      required: [id, path, updated_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        path:
+          type: string
+          example: /home/user/documents
+        updated_at:
+          type: string
+          format: date-time
+
+    FileEntry:
+      type: object
+      required: [name, relative_path, is_directory, size, modified_ms]
+      properties:
+        name:
+          type: string
+          example: img.jpg
+          description: Bare filename or directory name (no path separators)
+        relative_path:
+          type: string
+          example: photos/2024/img.jpg
+          description: |
+            POSIX path relative to the watched root directory.
+            Top-level entries have relative_path equal to name.
+            Subdirectory entries use forward-slash separators, e.g. "src/main.go".
+        is_directory:
+          type: boolean
+        size:
+          type: integer
+          format: int64
+          description: File size in bytes (0 for directories)
+        modified_ms:
+          type: integer
+          format: int64
+          description: Last-modified timestamp in milliseconds since Unix epoch
+
+    WatchedFile:
+      allOf:
+        - $ref: "#/components/schemas/FileEntry"
+        - type: object
+          required: [id, path_id, created_at]
+          properties:
+            id:
+              type: integer
+              format: int64
+            path_id:
+              type: integer
+              format: int64
+            created_at:
+              type: string
+              format: date-time
+
+    SyncWatchedFilesRequest:
+      type: object
+      required: [files]
+      properties:
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileEntry"
+          description: Complete current state of the watched directory (not a delta)
+
+    WatchedFilesResponse:
+      type: object
+      required: [files]
+      properties:
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/WatchedFile"
+
     ErrorResponse:
       type: object
       required: [error]
@@ -403,6 +584,12 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
     Conflict:
       description: Resource already exists (duplicate email)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
       content:
         application/json:
           schema:

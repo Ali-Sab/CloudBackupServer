@@ -10,10 +10,11 @@ global.window = global.window || {};
 window._testMode = true;
 
 // Provide stubs so api-client.js and api.js load cleanly
-const { APIClient, TokenStore, AuthExpiredError } = require('../src/renderer/api-client');
+const { APIClient, TokenStore, AuthExpiredError, escapeHtml } = require('../src/renderer/api-client');
 global.APIClient = APIClient;
 global.TokenStore = TokenStore;
 global.AuthExpiredError = AuthExpiredError;
+global.escapeHtml = escapeHtml;
 
 global.API = {
   fetchSession: jest.fn(),
@@ -24,7 +25,7 @@ global.API = {
   resetPassword: jest.fn(),
 };
 
-const { renderSessionState, escapeHtml } = require('../src/renderer/auth');
+const { renderSessionState } = require('../src/renderer/auth');
 
 // ---- renderSessionState ----
 

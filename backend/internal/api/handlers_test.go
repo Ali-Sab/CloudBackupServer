@@ -158,6 +158,46 @@ func TestSessionSvc_GenerateAndHashRefreshToken(t *testing.T) {
 	assert.NotEqual(t, hash, hash2)
 }
 
+// ---- File endpoint auth tests ----
+// These tests use a nil DB pool, so they only verify that the requireAuth
+// middleware fires correctly. Actual DB behaviour is covered in integration tests.
+
+func TestFileEndpoints_RequireAuth(t *testing.T) {
+	r := newTestRouter()
+
+	endpoints := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/files/path"},
+		{http.MethodPut, "/api/files/path"},
+		{http.MethodGet, "/api/files/"},
+		{http.MethodPut, "/api/files/sync"},
+	}
+
+	for _, ep := range endpoints {
+		req := httptest.NewRequest(ep.method, ep.path, nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "%s %s should require auth", ep.method, ep.path)
+
+		var errResp ErrorResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+		assert.NotEmpty(t, errResp.Error)
+	}
+}
+
+func TestFileEndpoints_InvalidToken(t *testing.T) {
+	r := newTestRouter()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/files/path", nil)
+	req.Header.Set("Authorization", "Bearer not-a-valid-jwt")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
 func TestSessionSvc_AccessTokenRoundtrip(t *testing.T) {
 	svc := session.NewService("unit-test-secret")
 

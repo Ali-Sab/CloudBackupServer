@@ -30,3 +30,27 @@ type PasswordResetToken struct {
 	Used      bool
 	CreatedAt time.Time
 }
+
+// WatchedPath represents a user's chosen local backup directory.
+// Each user has at most one watched path (enforced by DB unique constraint).
+type WatchedPath struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`
+	Path      string    `json:"path"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// WatchedFile represents a single file or directory entry within a watched path.
+// RelativePath is the POSIX path relative to the watched root (e.g. "photos/2024/img.jpg").
+// For top-level entries RelativePath equals Name.
+type WatchedFile struct {
+	ID           int64     `json:"id"`
+	PathID       int64     `json:"path_id"`
+	Name         string    `json:"name"`
+	RelativePath string    `json:"relative_path"`
+	IsDirectory  bool      `json:"is_directory"`
+	Size         int64     `json:"size"`
+	ModifiedMs   int64     `json:"modified_ms"`
+	CreatedAt    time.Time `json:"created_at"`
+}

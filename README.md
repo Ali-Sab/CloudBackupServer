@@ -79,6 +79,10 @@ The full OpenAPI 3.0 specification lives at [`backend/api/openapi.yaml`](backend
 | `POST` | `/api/auth/logout` | — | Revoke refresh token |
 | `POST` | `/api/auth/forgot-password` | — | Request a password reset token |
 | `POST` | `/api/auth/reset-password` | — | Reset password using reset token |
+| `GET` | `/api/files/path` | Bearer token | Get user's saved watched directory path |
+| `PUT` | `/api/files/path` | Bearer token | Set or replace the watched directory path |
+| `GET` | `/api/files/` | Bearer token | Get the last-synced file list |
+| `PUT` | `/api/files/sync` | Bearer token | Replace the stored file list (full sync) |
 
 Authentication uses a **two-token scheme**:
 - **Access token** — short-lived JWT (1 minute). Pass as `Authorization: Bearer <token>`.
@@ -111,21 +115,15 @@ Migration files live in [`backend/migrations/`](backend/migrations/).
 To add a new migration:
 
 ```bash
-cat > backend/migrations/00005_add_files_table.sql <<'SQL'
+cat > backend/migrations/00007_my_migration.sql <<'SQL'
 -- +goose Up
 -- +goose StatementBegin
-CREATE TABLE IF NOT EXISTS files (
-    id         BIGSERIAL PRIMARY KEY,
-    user_id    BIGINT NOT NULL REFERENCES users(id),
-    path       TEXT NOT NULL,
-    size_bytes BIGINT NOT NULL DEFAULT 0,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-);
+ALTER TABLE watched_files ADD COLUMN checksum TEXT;
 -- +goose StatementEnd
 
 -- +goose Down
 -- +goose StatementBegin
-DROP TABLE IF EXISTS files;
+ALTER TABLE watched_files DROP COLUMN checksum;
 -- +goose StatementEnd
 SQL
 ```
