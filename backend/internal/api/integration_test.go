@@ -548,7 +548,7 @@ func TestIntegration_ChangingPathClearsFiles(t *testing.T) {
 	// Set path and sync some files
 	authPut(t, srv.URL+"/api/files/path", token, `{"path":"/old/path"}`)
 	authPut(t, srv.URL+"/api/files/sync", token, `{"files":[
-		{"name":"old-file.txt","is_directory":false,"size":100,"modified_ms":0}
+		{"name":"old-file.txt","relative_path":"old-file.txt","is_directory":false,"size":100,"modified_ms":0}
 	]}`)
 
 	// Verify files exist

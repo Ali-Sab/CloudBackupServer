@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/ali-sab/cloudbackupserver/backend/internal/db"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/models"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/session"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -229,7 +232,12 @@ func (h *Handler) PostRegister(w http.ResponseWriter, r *http.Request) {
 		PasswordHash: string(hash),
 	}
 	if err := db.CreateUser(r.Context(), h.db, user); err != nil {
-		writeJSON(w, http.StatusConflict, ErrorResponse{Error: "email already registered"})
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			writeJSON(w, http.StatusConflict, ErrorResponse{Error: "email already registered"})
+		} else {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to create account"})
+		}
 		return
 	}
 
@@ -397,9 +405,15 @@ func (h *Handler) PostResetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Consume the reset token so it cannot be replayed.
-	_ = db.MarkPasswordResetTokenUsed(r.Context(), h.db, prt.ID)
+	// This must succeed — if it fails, return an error rather than letting the
+	// token remain reusable.
+	if err := db.MarkPasswordResetTokenUsed(r.Context(), h.db, prt.ID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to complete password reset"})
+		return
+	}
 
 	// Revoke all active sessions — user must log in again with the new password.
+	// Best-effort: sessions are invalidated naturally when the access token expires.
 	_ = db.RevokeAllUserRefreshTokens(r.Context(), h.db, prt.UserID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Password updated successfully. Please log in again."})
@@ -413,7 +427,11 @@ func (h *Handler) GetWatchedPath(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 	wp, err := db.GetWatchedPathByUserID(r.Context(), h.db, userID)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no watched path set"})
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no watched path set"})
+		} else {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve path"})
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, WatchedPathResponse{ID: wp.ID, Path: wp.Path, UpdatedAt: wp.UpdatedAt})
@@ -449,7 +467,11 @@ func (h *Handler) GetFiles(w http.ResponseWriter, r *http.Request) {
 
 	wp, err := db.GetWatchedPathByUserID(r.Context(), h.db, userID)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no watched path set"})
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no watched path set"})
+		} else {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve path"})
+		}
 		return
 	}
 
