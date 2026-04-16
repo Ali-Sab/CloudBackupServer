@@ -5,6 +5,7 @@
  *   - TokenStore  — centralised read/write for access + refresh tokens
  *   - APIClient   — fetch wrapper that auto-refreshes on 401
  *   - AuthExpiredError — thrown when a refresh attempt fails
+ *   - escapeHtml      — XSS-safe HTML escaping (shared utility)
  */
 
 'use strict';
@@ -25,39 +26,51 @@ function escapeHtml(str) {
 // ---- Token storage -------------------------------------------------------
 
 /**
- * TokenStore abstracts over Electron IPC (when running inside Electron) and
+ * TokenStore abstracts over in-memory storage (Electron) and
  * localStorage (fallback for tests / browser contexts).
+ *
+ * In Electron, fetch requests originate from file:// so cookies set by the
+ * http://localhost backend are never attached (cross-scheme). We store tokens
+ * in memory instead and send them as Authorization: Bearer headers.
  *
  * Access and refresh tokens are always updated together to stay in sync.
  */
+const _mem = { accessToken: null, refreshToken: null };
+
 const TokenStore = {
+  _isElectron() {
+    return typeof window !== 'undefined' && !!window.electronAPI;
+  },
+
   getAccessToken() {
-    if (typeof window !== 'undefined' && window.electronAPI) {
-      return window.electronAPI.getAccessToken();
-    }
+    if (this._isElectron()) return _mem.accessToken;
     return (typeof localStorage !== 'undefined') ? localStorage.getItem('access_token') : null;
   },
 
   getRefreshToken() {
-    if (typeof window !== 'undefined' && window.electronAPI) {
-      return window.electronAPI.getRefreshToken();
-    }
+    if (this._isElectron()) return _mem.refreshToken;
     return (typeof localStorage !== 'undefined') ? localStorage.getItem('refresh_token') : null;
   },
 
   store(accessToken, refreshToken) {
-    if (typeof window !== 'undefined' && window.electronAPI) {
-      window.electronAPI.setTokens(accessToken, refreshToken);
-    } else if (typeof localStorage !== 'undefined') {
+    if (this._isElectron()) {
+      _mem.accessToken = accessToken;
+      _mem.refreshToken = refreshToken;
+      return;
+    }
+    if (typeof localStorage !== 'undefined') {
       localStorage.setItem('access_token', accessToken);
       localStorage.setItem('refresh_token', refreshToken);
     }
   },
 
   clear() {
-    if (typeof window !== 'undefined' && window.electronAPI) {
-      window.electronAPI.clearTokens();
-    } else if (typeof localStorage !== 'undefined') {
+    if (this._isElectron()) {
+      _mem.accessToken = null;
+      _mem.refreshToken = null;
+      return;
+    }
+    if (typeof localStorage !== 'undefined') {
       localStorage.removeItem('access_token');
       localStorage.removeItem('refresh_token');
     }
@@ -86,6 +99,7 @@ async function _doRefresh() {
   try {
     const resp = await fetch(`${BASE_URL}/api/auth/refresh`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
@@ -147,11 +161,23 @@ const APIClient = {
    * @returns {Promise<Response>}
    */
   async post(path, body) {
-    return fetch(`${BASE_URL}${path}`, {
+    const resp = await fetch(`${BASE_URL}${path}`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    // In Electron, cookies don't cross the file:// → http:// boundary, so we
+    // capture tokens from the response body and store them for Bearer auth.
+    if (resp.ok && TokenStore._isElectron()) {
+      try {
+        const data = await resp.clone().json();
+        if (data.access_token && data.refresh_token) {
+          TokenStore.store(data.access_token, data.refresh_token);
+        }
+      } catch {}
+    }
+    return resp;
   },
 
   /**
@@ -178,7 +204,7 @@ const APIClient = {
     if (accessToken) {
       headers['Authorization'] = `Bearer ${accessToken}`;
     }
-    return fetch(`${BASE_URL}${path}`, { ...options, headers });
+    return fetch(`${BASE_URL}${path}`, { credentials: 'include', ...options, headers });
   },
 };
 

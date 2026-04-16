@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -49,19 +48,26 @@ type UserInfo struct {
 }
 
 // AuthResponse is returned after a successful login or registration.
-// Contains both a short-lived access token and a long-lived refresh token.
+// Tokens are also set as HttpOnly cookies for browser clients.
 type AuthResponse struct {
+	User         UserInfo `json:"user"`
 	AccessToken  string   `json:"access_token"`
 	RefreshToken string   `json:"refresh_token"`
-	User         UserInfo `json:"user"`
 }
 
 // RefreshResponse is returned by POST /api/auth/refresh.
+// Tokens are also rotated via HttpOnly cookies for browser clients.
 type RefreshResponse struct {
+	User         UserInfo `json:"user"`
 	AccessToken  string   `json:"access_token"`
 	RefreshToken string   `json:"refresh_token"`
-	User         UserInfo `json:"user"`
 }
+
+// Cookie names used for auth tokens.
+const (
+	cookieAccessToken  = "access_token"
+	cookieRefreshToken = "refresh_token"
+)
 
 // ErrorResponse wraps an error message returned to the client.
 type ErrorResponse struct {
@@ -78,16 +84,6 @@ type LoginRequest struct {
 type RegisterRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
-}
-
-// RefreshRequest is the body expected by POST /api/auth/refresh.
-type RefreshRequest struct {
-	RefreshToken string `json:"refresh_token"`
-}
-
-// LogoutRequest is the body expected by POST /api/auth/logout.
-type LogoutRequest struct {
-	RefreshToken string `json:"refresh_token"`
 }
 
 // ForgotPasswordRequest is the body expected by POST /api/auth/forgot-password.
@@ -141,6 +137,7 @@ type WatchedFilesResponse struct {
 	Files []models.WatchedFile `json:"files"`
 }
 
+
 // ---- Handlers ----
 
 // GetHealth handles GET /api/health.
@@ -149,16 +146,21 @@ func (h *Handler) GetHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetSession handles GET /api/session.
-// Returns current session state based on Authorization: Bearer <access_token>.
+// Returns current session state based on the Bearer token or access_token cookie.
 // Always returns 200 — missing/invalid tokens yield {logged_in: false}.
 func (h *Handler) GetSession(w http.ResponseWriter, r *http.Request) {
-	token := extractBearerToken(r)
-	if token == "" {
+	tokenStr := extractBearerToken(r)
+	if tokenStr == "" {
+		if cookie, err := r.Cookie(cookieAccessToken); err == nil {
+			tokenStr = cookie.Value
+		}
+	}
+	if tokenStr == "" {
 		writeJSON(w, http.StatusOK, SessionResponse{LoggedIn: false})
 		return
 	}
 
-	claims, err := h.sessionSvc.ValidateAccessToken(token)
+	claims, err := h.sessionSvc.ValidateAccessToken(tokenStr)
 	if err != nil {
 		writeJSON(w, http.StatusOK, SessionResponse{LoggedIn: false})
 		return
@@ -202,10 +204,11 @@ func (h *Handler) PostLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setAuthCookies(w, accessToken, rawRefresh)
 	writeJSON(w, http.StatusOK, AuthResponse{
+		User:         UserInfo{ID: user.ID, Email: user.Email},
 		AccessToken:  accessToken,
 		RefreshToken: rawRefresh,
-		User:         UserInfo{ID: user.ID, Email: user.Email},
 	})
 }
 
@@ -247,25 +250,41 @@ func (h *Handler) PostRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setAuthCookies(w, accessToken, rawRefresh)
 	writeJSON(w, http.StatusCreated, AuthResponse{
+		User:         UserInfo{ID: user.ID, Email: user.Email},
 		AccessToken:  accessToken,
 		RefreshToken: rawRefresh,
-		User:         UserInfo{ID: user.ID, Email: user.Email},
 	})
 }
 
 // PostRefresh handles POST /api/auth/refresh.
-// Validates the provided refresh token, rotates it (revoke old, issue new pair).
+// Validates the refresh token (from JSON body or cookie), rotates it (revoke old, issue new pair).
 func (h *Handler) PostRefresh(w http.ResponseWriter, r *http.Request) {
-	var req RefreshRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
+	// Accept refresh_token from JSON body (Electron/Bearer clients) or cookie (browser clients).
+	var rawRefreshToken string
+	if r.Header.Get("Content-Type") == "application/json" {
+		var body struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil && body.RefreshToken != "" {
+			rawRefreshToken = body.RefreshToken
+		}
+	}
+	if rawRefreshToken == "" {
+		if cookie, err := r.Cookie(cookieRefreshToken); err == nil && cookie.Value != "" {
+			rawRefreshToken = cookie.Value
+		}
+	}
+	if rawRefreshToken == "" {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "refresh_token is required"})
 		return
 	}
 
-	hash := session.HashToken(req.RefreshToken)
+	hash := session.HashToken(rawRefreshToken)
 	rt, err := db.GetRefreshTokenByHash(r.Context(), h.db, hash)
 	if err != nil {
+		clearAuthCookies(w)
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "invalid refresh token"})
 		return
 	}
@@ -273,11 +292,13 @@ func (h *Handler) PostRefresh(w http.ResponseWriter, r *http.Request) {
 	// Theft detection: revoked token re-presented → revoke all tokens for this user.
 	if rt.Revoked {
 		_ = db.RevokeAllUserRefreshTokens(r.Context(), h.db, rt.UserID)
+		clearAuthCookies(w)
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "refresh token reuse detected — all sessions revoked"})
 		return
 	}
 
 	if time.Now().After(rt.ExpiresAt) {
+		clearAuthCookies(w)
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "refresh token expired"})
 		return
 	}
@@ -300,29 +321,43 @@ func (h *Handler) PostRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setAuthCookies(w, accessToken, rawRefresh)
 	writeJSON(w, http.StatusOK, RefreshResponse{
+		User:         UserInfo{ID: user.ID, Email: user.Email},
 		AccessToken:  accessToken,
 		RefreshToken: rawRefresh,
-		User:         UserInfo{ID: user.ID, Email: user.Email},
 	})
 }
 
 // PostLogout handles POST /api/auth/logout.
-// Revokes the provided refresh token. Idempotent — succeeds even if already revoked.
+// Revokes the refresh token (from JSON body or cookie). Idempotent — succeeds even if absent or already revoked.
 func (h *Handler) PostLogout(w http.ResponseWriter, r *http.Request) {
-	var req LogoutRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "refresh_token is required"})
-		return
+	// Accept refresh_token from JSON body (Electron/Bearer clients) or cookie (browser clients).
+	var rawToken string
+	if r.Header.Get("Content-Type") == "application/json" {
+		var body struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			rawToken = body.RefreshToken
+		}
+	}
+	if rawToken == "" {
+		if cookie, err := r.Cookie(cookieRefreshToken); err == nil {
+			rawToken = cookie.Value
+		}
 	}
 
-	hash := session.HashToken(req.RefreshToken)
-	rt, err := db.GetRefreshTokenByHash(r.Context(), h.db, hash)
-	if err == nil && !rt.Revoked {
-		// Best-effort revocation — ignore error so logout is always idempotent.
-		_ = db.RevokeRefreshToken(r.Context(), h.db, rt.ID)
+	if rawToken != "" {
+		hash := session.HashToken(rawToken)
+		rt, err := db.GetRefreshTokenByHash(r.Context(), h.db, hash)
+		if err == nil && !rt.Revoked {
+			// Best-effort revocation — ignore error so logout is always idempotent.
+			_ = db.RevokeRefreshToken(r.Context(), h.db, rt.ID)
+		}
 	}
 
+	clearAuthCookies(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -337,14 +372,16 @@ func (h *Handler) PostForgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	genericMsg := "If the account exists, a reset token has been issued."
-
+	// DEV MODE: return a clear 404 when the email isn't found so it's easy to spot
+	// missing accounts during development. Before shipping, replace this with a
+	// generic 200 {"message": genericMsg} response to prevent email enumeration.
 	user, err := db.GetUserByEmail(r.Context(), h.db, req.Email)
 	if err != nil {
-		// Don't reveal whether the email exists.
-		writeJSON(w, http.StatusOK, ForgotPasswordResponse{Message: genericMsg})
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no account found with that email"})
 		return
 	}
+
+	genericMsg := "If the account exists, a reset token has been issued."
 
 	rawToken, hash, err := session.GenerateRefreshToken() // reuse the same generator
 	if err != nil {
@@ -452,11 +489,12 @@ func (h *Handler) PutWatchedPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wp, err := db.SetWatchedPath(r.Context(), h.db, userID, req.Path)
+	wp, pathChanged, err := db.SetWatchedPath(r.Context(), h.db, userID, req.Path)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to save path"})
 		return
 	}
+
 	writeJSON(w, http.StatusOK, WatchedPathResponse{ID: wp.ID, Path: wp.Path, UpdatedAt: wp.UpdatedAt})
 }
 
@@ -544,16 +582,40 @@ func (h *Handler) issueTokenPair(r *http.Request, user *models.User) (accessToke
 	return accessToken, rawRefresh, nil
 }
 
-func extractBearerToken(r *http.Request) string {
-	auth := r.Header.Get("Authorization")
-	if auth == "" {
-		return ""
-	}
-	parts := strings.SplitN(auth, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-		return ""
-	}
-	return parts[1]
+func setAuthCookies(w http.ResponseWriter, accessToken, rawRefresh string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieAccessToken,
+		Value:    accessToken,
+		Path:     "/",
+		MaxAge:   int(session.AccessTokenTTL.Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieRefreshToken,
+		Value:    rawRefresh,
+		Path:     "/api/auth/refresh",
+		MaxAge:   int(session.RefreshTokenTTL.Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func clearAuthCookies(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieAccessToken,
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieRefreshToken,
+		Path:     "/api/auth/refresh",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

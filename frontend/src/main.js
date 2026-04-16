@@ -8,11 +8,6 @@ if (process.env.NODE_ENV === 'development') {
   });
 }
 
-// In-memory token store — persists for the process lifetime.
-// Both tokens are updated together so they always stay in sync.
-let accessToken = null;
-let refreshToken = null;
-
 // Active directory watcher — only one at a time.
 let dirWatcher = null;
 
@@ -37,28 +32,6 @@ function createWindow() {
     win.webContents.openDevTools();
   }
 }
-
-// ---- IPC: token management ----
-
-ipcMain.on('get-access-token', (event) => {
-  event.returnValue = accessToken;
-});
-
-ipcMain.on('get-refresh-token', (event) => {
-  event.returnValue = refreshToken;
-});
-
-ipcMain.on('set-tokens', (event, { access, refresh }) => {
-  accessToken = access;
-  refreshToken = refresh;
-  event.returnValue = null;
-});
-
-ipcMain.on('clear-tokens', (event) => {
-  accessToken = null;
-  refreshToken = null;
-  event.returnValue = null;
-});
 
 // ---- IPC: directory browser ----
 
@@ -115,6 +88,7 @@ ipcMain.handle('unwatch-directory', () => {
     dirWatcher = null;
   }
 });
+
 
 // ---- App lifecycle ----
 

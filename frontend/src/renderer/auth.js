@@ -1,7 +1,7 @@
 /**
  * Auth UI — session check, login, register, forgot/reset password, logout.
  *
- * Depends on: api-client.js (window.TokenStore, window.AuthExpiredError)
+ * Depends on: api-client.js (window.AuthExpiredError)
  *             api.js        (window.API)
  *
  * Exposes: window.Auth.checkSession
@@ -14,9 +14,9 @@
   const _mod = (typeof require !== 'undefined' && typeof module !== 'undefined')
     ? require('./api-client')
     : null;
-  const TokenStore       = _mod ? _mod.TokenStore       : window.TokenStore;
   const AuthExpiredError = _mod ? _mod.AuthExpiredError : window.AuthExpiredError;
   const escapeHtml       = _mod ? _mod.escapeHtml       : window.escapeHtml;
+  const TokenStore       = _mod ? _mod.TokenStore       : window.TokenStore;
 
   const _apiMod = (typeof require !== 'undefined' && typeof module !== 'undefined')
     ? require('./api')
@@ -136,8 +136,7 @@
           errorEl.textContent = msg;
           return;
         }
-        const data = await resp.json();
-        TokenStore.store(data.access_token, data.refresh_token);
+        // Auth cookies are set by the server; nothing to store in JS.
         checkSession();
       } catch {
         errorEl.textContent = 'Connection error — please try again.';
@@ -177,8 +176,7 @@
           errorEl.textContent = msg;
           return;
         }
-        const data = await resp.json();
-        TokenStore.store(data.access_token, data.refresh_token);
+        // Auth cookies are set by the server; nothing to store in JS.
         checkSession();
       } catch {
         errorEl.textContent = 'Connection error — please try again.';
@@ -269,7 +267,6 @@
           errorEl.textContent = msg;
           return;
         }
-        TokenStore.clear();
         renderLoginForm(el, 'Password updated. Please sign in with your new password.');
       } catch {
         errorEl.textContent = 'Connection error — please try again.';
@@ -279,13 +276,10 @@
     // -- Logout --------------------------------------------------------------
 
     async function logout() {
-      const refreshToken = TokenStore.getRefreshToken();
-      if (refreshToken) {
-        try {
-          await API.logout(refreshToken);
-        } catch {
-          // Ignore network errors — local clear still happens below.
-        }
+      try {
+        await API.logout();
+      } catch {
+        // Ignore network errors — token will expire naturally.
       }
       TokenStore.clear();
       checkSession();
