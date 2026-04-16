@@ -1,5 +1,6 @@
 # ---- Go ----
 backend/bin/
+backend/server
 backend/vendor/
 *.test
 *.out
@@ -8,6 +9,10 @@ backend/vendor/
 frontend/node_modules/
 frontend/dist/
 frontend/.cache/
+
+# ---- Playwright E2E ----
+frontend/e2e-report/
+frontend/test-results/
 
 # ---- Environment ----
 .env

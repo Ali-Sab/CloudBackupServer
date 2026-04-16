@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # ---- PostgreSQL ----
   postgres:
@@ -20,6 +18,38 @@ services:
       retries: 10
       start_period: 10s
 
+  # ---- MinIO object storage ----
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_dev}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ---- One-shot bucket init (runs once after MinIO is healthy) ----
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin_dev};
+      mc mb --ignore-existing local/$${MINIO_BUCKET:-cloudbackup};
+      exit 0;"
+
   # ---- Go backend ----
   backend:
     build:
@@ -30,12 +60,21 @@ services:
       DATABASE_URL: postgres://cloudbackup:${POSTGRES_PASSWORD:-cloudbackup_dev}@postgres:5432/cloudbackup?sslmode=disable
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: ${BACKEND_PORT:-8080}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin_dev}
+      MINIO_BUCKET: ${MINIO_BUCKET:-cloudbackup}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
     ports:
       - "${BACKEND_PORT:-8080}:${BACKEND_PORT:-8080}"
     depends_on:
       postgres:
         condition: service_healthy
+      minio:
+        condition: service_healthy
 
 volumes:
   postgres_data:
+    driver: local
+  minio_data:
     driver: local

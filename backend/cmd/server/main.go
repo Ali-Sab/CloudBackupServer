@@ -12,6 +12,7 @@ import (
 	"github.com/ali-sab/cloudbackupserver/backend/internal/api"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/db"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/session"
+	"github.com/ali-sab/cloudbackupserver/backend/internal/storage"
 )
 
 func main() {
@@ -38,16 +39,29 @@ func main() {
 	}
 	defer pool.Close()
 
+	// Connect to object storage
+	store, err := storage.New(
+		mustEnv("MINIO_ENDPOINT"),
+		mustEnv("MINIO_ACCESS_KEY"),
+		mustEnv("MINIO_SECRET_KEY"),
+		mustEnv("MINIO_BUCKET"),
+		os.Getenv("MINIO_USE_SSL") == "true",
+	)
+	if err != nil {
+		log.Fatalf("Storage init failed: %v", err)
+	}
+
 	// Wire up application
 	sessionSvc := session.NewService(jwtSecret)
-	router := api.NewRouter(pool, sessionSvc)
+	router := api.NewRouter(pool, sessionSvc, store)
 
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:    ":" + port,
+		Handler: router,
+		// No read/write timeouts — uploads and downloads can be arbitrarily large.
+		// ReadHeaderTimeout still protects against Slowloris-style header attacks.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	// Start server in background

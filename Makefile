@@ -1,5 +1,5 @@
 .PHONY: setup up down db-reset ps logs build \
-        test test-backend test-frontend test-integration \
+        test test-backend test-frontend test-integration test-e2e \
         clean help
 
 # ---- Setup ---------------------------------------------------------------
@@ -68,6 +68,11 @@ test-integration:
 	@echo "==> Running integration tests"
 	@set -a && . ./.env && set +a && \
 	cd backend && TEST_DATABASE_URL="postgres://cloudbackup:$${POSTGRES_PASSWORD:-cloudbackup_dev}@localhost:$${POSTGRES_PORT:-5432}/cloudbackup?sslmode=disable" go test -v -race -tags integration ./...
+
+## test-e2e: run Electron smoke tests (requires: make up)
+test-e2e:
+	@echo "==> Running Electron E2E smoke tests (backend must be running)"
+	cd frontend && npm run test:e2e
 
 # ---- Misc ----------------------------------------------------------------
 

@@ -21,4 +21,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Register a callback that fires whenever the watched directory changes. */
   onDirectoryChange: (callback) =>
     ipcRenderer.on('directory-changed', (_event, data) => callback(data)),
+
+  // ---- File backup ----
+
+  /**
+   * Upload a single file to the backend backup endpoint.
+   * Streams the file bytes — does not buffer the entire file in memory.
+   * SHA-256 is computed by streaming as well.
+   * Auth is handled via the access_token cookie read from the Electron session store.
+   *
+   * @param {string} rootPath      - Absolute path to the watched directory root
+   * @param {string} relativePath  - POSIX relative path within the root (e.g. "photos/img.jpg")
+   * @param {string} apiBaseUrl    - Backend base URL (e.g. "http://localhost:8080")
+   * @returns {Promise<{skipped: boolean, error: string|null}>}
+   */
+  uploadFile: (rootPath, relativePath, apiBaseUrl, accessToken) =>
+    ipcRenderer.invoke('upload-file', { rootPath, relativePath, apiBaseUrl, accessToken }),
 });

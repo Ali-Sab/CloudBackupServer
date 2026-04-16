@@ -6,11 +6,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ali-sab/cloudbackupserver/backend/internal/session"
+	"github.com/ali-sab/cloudbackupserver/backend/internal/storage"
 )
 
 // NewRouter wires up all routes and middleware and returns the root handler.
-func NewRouter(pool *pgxpool.Pool, sessionSvc *session.Service) *chi.Mux {
-	h := NewHandler(pool, sessionSvc)
+func NewRouter(pool *pgxpool.Pool, sessionSvc *session.Service, store storage.Backend) *chi.Mux {
+	h := NewHandler(pool, sessionSvc, store)
 
 	r := chi.NewRouter()
 
@@ -40,6 +41,8 @@ func NewRouter(pool *pgxpool.Pool, sessionSvc *session.Service) *chi.Mux {
 			r.Put("/path", h.PutWatchedPath)
 			r.Get("/", h.GetFiles)
 			r.Put("/sync", h.PutSyncFiles)
+			r.Put("/backup/*", h.PutFileBackup)
+			r.Get("/backup/*", h.GetFileBackup)
 		})
 	})
 

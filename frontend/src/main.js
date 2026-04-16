@@ -1,6 +1,9 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const http = require('http');
+const https = require('https');
 
 if (process.env.NODE_ENV === 'development') {
   require('electron-reload')(__dirname, {
@@ -37,6 +40,10 @@ function createWindow() {
 
 // Opens native folder picker; returns the chosen path or null if cancelled.
 ipcMain.handle('select-directory', async () => {
+  // E2E test bypass: return the env var path directly instead of opening the OS dialog.
+  if (process.env.E2E_SELECT_DIR) {
+    return process.env.E2E_SELECT_DIR;
+  }
   const result = await dialog.showOpenDialog(win, {
     properties: ['openDirectory'],
   });
@@ -89,6 +96,87 @@ ipcMain.handle('unwatch-directory', () => {
   }
 });
 
+// ---- IPC: file backup upload ----
+
+// Streams a single file to the backend backup endpoint.
+// Computes SHA-256 by streaming the file (no buffering), then streams the bytes
+// directly into the HTTP request body via fs.createReadStream().pipe(req).
+//
+// Uses native http/https instead of fetch because Node fetch does not reliably
+// support streaming request bodies with a known Content-Length in all Electron versions.
+//
+// Returns { skipped: boolean, error: string|null }.
+ipcMain.handle('upload-file', async (_event, { rootPath, relativePath, apiBaseUrl, accessToken }) => {
+  const sep = path.sep;
+  const absPath = path.join(rootPath, relativePath.split('/').join(sep));
+
+  let stat;
+  try {
+    stat = fs.statSync(absPath);
+  } catch (e) {
+    return { error: `Cannot stat file: ${e.message}` };
+  }
+
+  // Stream the file through SHA-256 to get checksum — never loaded fully into memory.
+  let checksum;
+  try {
+    checksum = await new Promise((resolve, reject) => {
+      const hash = crypto.createHash('sha256');
+      const stream = fs.createReadStream(absPath);
+      stream.on('data', chunk => hash.update(chunk));
+      stream.on('end', () => resolve(hash.digest('hex')));
+      stream.on('error', reject);
+    });
+  } catch (e) {
+    return { error: `Checksum failed: ${e.message}` };
+  }
+
+  // Build the request URL — each path segment is percent-encoded, slashes preserved.
+  const encodedPath = relativePath.split('/').map(encodeURIComponent).join('/');
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(`${apiBaseUrl}/api/files/backup/${encodedPath}`);
+  } catch (e) {
+    return { error: `Invalid URL: ${e.message}` };
+  }
+
+  const protocol = parsedUrl.protocol === 'https:' ? https : http;
+
+  return new Promise((resolve) => {
+    const req = protocol.request({
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+      path: parsedUrl.pathname,
+      method: 'PUT',
+      headers: {
+        ...(accessToken ? { 'Authorization': `Bearer ${accessToken}` } : {}),
+        'X-Checksum-SHA256': checksum,
+        'X-File-Size': String(stat.size),
+        'Content-Type': 'application/octet-stream',
+      },
+    }, (res) => {
+      let body = '';
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          try {
+            const parsed = JSON.parse(body);
+            resolve({ skipped: !!parsed.skipped, error: null });
+          } catch {
+            resolve({ skipped: false, error: null });
+          }
+        } else {
+          resolve({ error: `Upload failed: HTTP ${res.statusCode}` });
+        }
+      });
+    });
+
+    req.on('error', (e) => resolve({ error: e.message }));
+
+    // Stream file bytes into the request body — no buffering.
+    fs.createReadStream(absPath).pipe(req);
+  });
+});
 
 // ---- App lifecycle ----
 

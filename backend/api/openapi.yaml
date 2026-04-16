@@ -46,6 +46,8 @@ tags:
     description: Authentication, session management, and password reset
   - name: Files
     description: Watched directory path and file list management (requires auth)
+  - name: Backup
+    description: File content upload and download (requires auth)
 
 paths:
   /api/health:
@@ -281,6 +283,10 @@ paths:
       description: |
         Creates or replaces the authenticated user's watched directory path.
         Each user has at most one watched path — this upserts it.
+
+        **Side effect on path change:** if the new path differs from the previous one, all
+        backed-up file objects and `file_backups` DB records for this user are deleted.
+        Both deletions are best-effort (failures are logged but not surfaced to the client).
       operationId: setWatchedPath
       tags: [Files]
       security:
@@ -352,6 +358,104 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/files/backup/{relative_path}:
+    parameters:
+      - name: relative_path
+        in: path
+        required: true
+        schema:
+          type: string
+        description: |
+          POSIX-style path relative to the watched root (e.g. `photos/2024/img.jpg`).
+          Each segment is percent-encoded; slashes are preserved.
+          Must not contain `..`.
+        example: photos/2024/img.jpg
+    put:
+      summary: Upload a file for backup
+      description: |
+        Streams the request body into object storage.
+
+        **Deduplication:** if the `X-Checksum-SHA256` header matches the stored checksum
+        for this path, the upload is skipped and `skipped: true` is returned — the body
+        is never read. This makes repeated syncs efficient for unchanged files.
+
+        When the watched path changes, all backed-up content is automatically deleted.
+      operationId: uploadFile
+      tags: [Backup]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: X-Checksum-SHA256
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Hex-encoded SHA-256 of the file bytes.
+          example: a1b2c3d4e5f6...
+        - name: X-File-Size
+          in: header
+          required: true
+          schema:
+            type: integer
+          description: Exact byte count of the file. Used for the DB record and response.
+          example: 204800
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Upload complete (or skipped — see `skipped` field)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadFileResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          description: Storage or database failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      summary: Download a backed-up file
+      description: Streams the backed-up file bytes from object storage.
+      operationId: downloadFile
+      tags: [Backup]
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: File bytes
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: 'attachment; filename="<name>"'
+            Content-Length:
+              schema:
+                type: integer
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: DB record exists but the object is missing from storage (orphaned record)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
 components:
   securitySchemes:
@@ -589,6 +693,29 @@ components:
           items:
             $ref: "#/components/schemas/WatchedFile"
 
+    UploadFileResponse:
+      type: object
+      required: [relative_path, size, checksum_sha256, backed_up_at, skipped]
+      properties:
+        relative_path:
+          type: string
+          example: photos/2024/img.jpg
+        size:
+          type: integer
+          format: int64
+          description: File size in bytes
+          example: 3145728
+        checksum_sha256:
+          type: string
+          description: Hex-encoded SHA-256 provided by the client
+          example: a1b2c3d4e5f6...
+        backed_up_at:
+          type: string
+          format: date-time
+          example: "2026-04-10T14:32:00Z"
+        skipped:
+          type: boolean
+          description: true when the checksum matched and no upload occurred
 
     ErrorResponse:
       type: object
