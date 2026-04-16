@@ -17,8 +17,9 @@ info:
       for clients that cannot use cookies. Only the SHA-256 hash is stored in the database; the
       raw token is never persisted.
 
-    Tokens are also returned in the JSON response body on login/register/refresh so that
-    non-browser clients (e.g. Insomnia without cookie support) can still read them.
+    Tokens are also returned in the JSON response body on login/register/refresh for clients
+    that cannot use cookies (e.g. Electron from a `file://` origin). Insomnia users should
+    rely on the cookie jar instead — run login once and all requests are authenticated automatically.
 
     ### Token rotation
     Every call to `/api/auth/refresh` issues a *new* refresh token and revokes the old one.
@@ -30,7 +31,7 @@ info:
     and returns a 404 when the email is not found (anti-enumeration is disabled).
     Both behaviours will be reversed before production: the token will be delivered by email
     and the response will look identical regardless of whether the email exists.
-  version: 0.2.5
+  version: 0.2.6
   license:
     name: GNU General Public License v3.0
     url: https://www.gnu.org/licenses/gpl-3.0.html
@@ -38,6 +39,13 @@ info:
 servers:
   - url: http://localhost:8080
     description: Local development server
+
+# Global default: every protected endpoint requires CookieAuth (or BearerAuth as fallback).
+# Insomnia applies the first listed scheme automatically on import and uses the cookie jar
+# to capture the access_token set by login/register/refresh.
+security:
+  - CookieAuth: []
+  - BearerAuth: []
 
 tags:
   - name: Health
@@ -75,8 +83,8 @@ paths:
       operationId: getSession
       tags: [Auth]
       security:
-        - BearerAuth: []
         - CookieAuth: []
+        - BearerAuth: []
       responses:
         "200":
           description: Session state
@@ -99,6 +107,7 @@ paths:
       summary: Register a new user
       operationId: register
       tags: [Auth]
+      security: []
       requestBody:
         required: true
         content:
@@ -107,7 +116,15 @@ paths:
               $ref: "#/components/schemas/RegisterRequest"
       responses:
         "201":
-          description: Registration successful — returns token pair
+          description: Registration successful — returns token pair and sets auth cookies
+          headers:
+            Set-Cookie:
+              description: |
+                Two cookies are set:
+                `access_token=<jwt>; HttpOnly; SameSite=Lax; Path=/` (1 min TTL)
+                `refresh_token=<token>; HttpOnly; SameSite=Lax; Path=/api/auth/refresh` (30 day TTL)
+              schema:
+                type: string
           content:
             application/json:
               schema:
@@ -122,6 +139,7 @@ paths:
       summary: Log in with email and password
       operationId: login
       tags: [Auth]
+      security: []
       requestBody:
         required: true
         content:
@@ -130,7 +148,15 @@ paths:
               $ref: "#/components/schemas/LoginRequest"
       responses:
         "200":
-          description: Login successful — returns token pair
+          description: Login successful — returns token pair and sets auth cookies
+          headers:
+            Set-Cookie:
+              description: |
+                Two cookies are set:
+                `access_token=<jwt>; HttpOnly; SameSite=Lax; Path=/` (1 min TTL)
+                `refresh_token=<token>; HttpOnly; SameSite=Lax; Path=/api/auth/refresh` (30 day TTL)
+              schema:
+                type: string
           content:
             application/json:
               schema:
@@ -154,6 +180,7 @@ paths:
         request body. The request body is optional when the cookie is present.
       operationId: refreshTokens
       tags: [Auth]
+      security: []
       requestBody:
         required: false
         content:
@@ -162,7 +189,15 @@ paths:
               $ref: "#/components/schemas/RefreshRequest"
       responses:
         "200":
-          description: New token pair issued
+          description: New token pair issued and cookies rotated
+          headers:
+            Set-Cookie:
+              description: |
+                Rotated cookies (old tokens revoked):
+                `access_token=<jwt>; HttpOnly; SameSite=Lax; Path=/` (1 min TTL)
+                `refresh_token=<token>; HttpOnly; SameSite=Lax; Path=/api/auth/refresh` (30 day TTL)
+              schema:
+                type: string
           content:
             application/json:
               schema:
@@ -187,6 +222,7 @@ paths:
         (nothing to revoke).
       operationId: logout
       tags: [Auth]
+      security: []
       requestBody:
         required: false
         content:
@@ -213,6 +249,7 @@ paths:
         In production this field will be removed and the token delivered by email.
       operationId: forgotPassword
       tags: [Auth]
+      security: []
       requestBody:
         required: true
         content:
@@ -239,6 +276,7 @@ paths:
         and revokes all active refresh tokens for that user (forcing re-login everywhere).
       operationId: resetPassword
       tags: [Auth]
+      security: []
       requestBody:
         required: true
         content:
@@ -266,6 +304,7 @@ paths:
       operationId: getWatchedPath
       tags: [Files]
       security:
+        - CookieAuth: []
         - BearerAuth: []
       responses:
         "200":
@@ -290,6 +329,7 @@ paths:
       operationId: setWatchedPath
       tags: [Files]
       security:
+        - CookieAuth: []
         - BearerAuth: []
       requestBody:
         required: true
@@ -318,6 +358,7 @@ paths:
       operationId: getFiles
       tags: [Files]
       security:
+        - CookieAuth: []
         - BearerAuth: []
       responses:
         "200":
@@ -341,6 +382,7 @@ paths:
       operationId: syncFiles
       tags: [Files]
       security:
+        - CookieAuth: []
         - BearerAuth: []
       requestBody:
         required: true
@@ -383,6 +425,7 @@ paths:
       operationId: uploadFile
       tags: [Backup]
       security:
+        - CookieAuth: []
         - BearerAuth: []
       parameters:
         - name: X-Checksum-SHA256
@@ -429,6 +472,7 @@ paths:
       operationId: downloadFile
       tags: [Backup]
       security:
+        - CookieAuth: []
         - BearerAuth: []
       responses:
         "200":
@@ -459,17 +503,21 @@ paths:
 
 components:
   securitySchemes:
-    BearerAuth:
-      type: http
-      scheme: bearer
-      description: |
-        Legacy Bearer token auth — still accepted for backwards compat.
-        Preferred: use CookieAuth (set automatically on login/register/refresh).
     CookieAuth:
       type: apiKey
       in: cookie
       name: access_token
-      description: HttpOnly `access_token` cookie (SameSite=Lax, 1 minute TTL) set automatically by login/register/refresh. Primary auth mechanism for browser clients.
+      description: |
+        **Primary auth mechanism.** HttpOnly `access_token` cookie (SameSite=Lax, 1 minute TTL)
+        set automatically by login/register/refresh. Insomnia captures it via the cookie jar —
+        enable "Send Cookies" and run POST /api/auth/login first; all subsequent requests are
+        authenticated automatically.
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Fallback for clients that cannot use cookies (e.g. Electron from a file:// origin).
+        Pass the `access_token` value from the login response body as `Authorization: Bearer <token>`.
 
   schemas:
     HealthResponse:
