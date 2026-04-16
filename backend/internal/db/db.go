@@ -201,11 +201,15 @@ func MarkPasswordResetTokenUsed(ctx context.Context, pool *pgxpool.Pool, id int6
 
 // SetWatchedPath upserts the user's watched directory path.
 // Each user may have at most one watched path; this replaces it if it already exists.
-// If the path changes, the stale file list is cleared atomically in the same transaction.
-func SetWatchedPath(ctx context.Context, pool *pgxpool.Pool, userID int64, path string) (*models.WatchedPath, error) {
+// If the path changes, the stale watched_files are cleared atomically in the same transaction.
+//
+// The second return value is true when the path actually changed (i.e. there was an
+// existing row and its path differed from the new value). Callers can use this to
+// trigger cleanup of backed-up content in object storage.
+func SetWatchedPath(ctx context.Context, pool *pgxpool.Pool, userID int64, path string) (*models.WatchedPath, bool, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("beginning transaction: %w", err)
+		return nil, false, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
@@ -228,22 +232,24 @@ func SetWatchedPath(ctx context.Context, pool *pgxpool.Pool, userID int64, path 
 		 RETURNING id, user_id, path, created_at, updated_at`,
 		userID, path,
 	).Scan(&wp.ID, &wp.UserID, &wp.Path, &wp.CreatedAt, &wp.UpdatedAt); err != nil {
-		return nil, fmt.Errorf("setting watched path: %w", err)
+		return nil, false, fmt.Errorf("setting watched path: %w", err)
 	}
 
+	pathChanged := hadExisting && oldPath != path
+
 	// Clear the file list when the path changes — the old files describe a different directory.
-	if hadExisting && oldPath != path {
+	if pathChanged {
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM watched_files WHERE path_id = $1`, oldPathID,
 		); err != nil {
-			return nil, fmt.Errorf("clearing stale watched files: %w", err)
+			return nil, false, fmt.Errorf("clearing stale watched files: %w", err)
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("committing watched path: %w", err)
+		return nil, false, fmt.Errorf("committing watched path: %w", err)
 	}
-	return wp, nil
+	return wp, pathChanged, nil
 }
 
 // GetWatchedPathByUserID returns the user's watched path, or an error if none is set.
@@ -318,4 +324,54 @@ func GetWatchedFiles(ctx context.Context, pool *pgxpool.Pool, pathID int64) ([]m
 		files = []models.WatchedFile{}
 	}
 	return files, rows.Err()
+}
+
+// ---- File backups ----
+
+// UpsertFileBackup inserts or updates a backup record for a single file.
+// The unique constraint is (user_id, relative_path) — safe to call repeatedly.
+// On conflict the record is updated with the new checksum, size, object_key, and backed_up_at.
+func UpsertFileBackup(ctx context.Context, pool *pgxpool.Pool, b *models.FileBackup) error {
+	err := pool.QueryRow(ctx,
+		`INSERT INTO file_backups (user_id, relative_path, size, checksum_sha256, object_key)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (user_id, relative_path) DO UPDATE
+		   SET size            = EXCLUDED.size,
+		       checksum_sha256 = EXCLUDED.checksum_sha256,
+		       object_key      = EXCLUDED.object_key,
+		       backed_up_at    = NOW()
+		 RETURNING id, backed_up_at`,
+		b.UserID, b.RelativePath, b.Size, b.ChecksumSHA256, b.ObjectKey,
+	).Scan(&b.ID, &b.BackedUpAt)
+	if err != nil {
+		return fmt.Errorf("upserting file backup: %w", err)
+	}
+	return nil
+}
+
+// GetFileBackup returns the backup record for a specific user + relative path.
+// Returns pgx.ErrNoRows (wrapped) if no backup exists for that path.
+func GetFileBackup(ctx context.Context, pool *pgxpool.Pool, userID int64, relativePath string) (*models.FileBackup, error) {
+	b := &models.FileBackup{}
+	err := pool.QueryRow(ctx,
+		`SELECT id, user_id, relative_path, size, checksum_sha256, object_key, backed_up_at
+		 FROM file_backups WHERE user_id = $1 AND relative_path = $2`,
+		userID, relativePath,
+	).Scan(&b.ID, &b.UserID, &b.RelativePath, &b.Size, &b.ChecksumSHA256, &b.ObjectKey, &b.BackedUpAt)
+	if err != nil {
+		return nil, fmt.Errorf("getting file backup: %w", err)
+	}
+	return b, nil
+}
+
+// DeleteFileBackupsByUserID deletes all backup records for a user.
+// Called after a watched path change — the old backed-up content is stale.
+func DeleteFileBackupsByUserID(ctx context.Context, pool *pgxpool.Pool, userID int64) error {
+	_, err := pool.Exec(ctx,
+		`DELETE FROM file_backups WHERE user_id = $1`, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("deleting file backups for user %d: %w", userID, err)
+	}
+	return nil
 }

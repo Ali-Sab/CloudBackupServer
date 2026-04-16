@@ -3,14 +3,22 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/db"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/models"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/session"
+	"github.com/ali-sab/cloudbackupserver/backend/internal/storage"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,13 +26,14 @@ import (
 
 // Handler holds shared dependencies for all HTTP handlers.
 type Handler struct {
-	db         *pgxpool.Pool // may be nil in unit tests that don't touch the DB
+	db         *pgxpool.Pool    // may be nil in unit tests that don't touch the DB
 	sessionSvc *session.Service
+	storage    storage.Backend  // may be nil in unit tests that don't touch storage
 }
 
 // NewHandler creates a Handler with the provided dependencies.
-func NewHandler(pool *pgxpool.Pool, sessionSvc *session.Service) *Handler {
-	return &Handler{db: pool, sessionSvc: sessionSvc}
+func NewHandler(pool *pgxpool.Pool, sessionSvc *session.Service, store storage.Backend) *Handler {
+	return &Handler{db: pool, sessionSvc: sessionSvc, storage: store}
 }
 
 // ---- Request / response types (exported for tests) ----
@@ -137,6 +146,14 @@ type WatchedFilesResponse struct {
 	Files []models.WatchedFile `json:"files"`
 }
 
+// UploadFileResponse is returned by PUT /api/files/backup/*.
+type UploadFileResponse struct {
+	RelativePath   string    `json:"relative_path"`
+	Size           int64     `json:"size"`
+	ChecksumSHA256 string    `json:"checksum_sha256"`
+	BackedUpAt     time.Time `json:"backed_up_at"`
+	Skipped        bool      `json:"skipped"` // true when checksum matched — no upload occurred
+}
 
 // ---- Handlers ----
 
@@ -495,6 +512,19 @@ func (h *Handler) PutWatchedPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// When the path changes, clean up the stale backed-up content.
+	// Both operations are best-effort — failures are logged but do not affect the response.
+	// MinIO is deleted first so that if it partially fails, the DB records remain as the
+	// source of truth (they'll be overwritten on the next upload of the same relative paths).
+	if pathChanged && h.storage != nil {
+		if cleanErr := h.storage.DeleteUserObjects(r.Context(), userID); cleanErr != nil {
+			log.Printf("warn: failed to delete MinIO objects for user %d on path change: %v", userID, cleanErr)
+		}
+		if cleanErr := db.DeleteFileBackupsByUserID(r.Context(), h.db, userID); cleanErr != nil {
+			log.Printf("warn: failed to delete file_backups for user %d on path change: %v", userID, cleanErr)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, WatchedPathResponse{ID: wp.ID, Path: wp.Path, UpdatedAt: wp.UpdatedAt})
 }
 
@@ -557,6 +587,122 @@ func (h *Handler) PutSyncFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- Backup handlers ----
+
+// PutFileBackup handles PUT /api/files/backup/*.
+// Streams the request body into object storage for the authenticated user.
+// Skips the upload when the provided checksum matches the stored record (file unchanged).
+func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+
+	// chi wildcard captures everything after /backup/
+	relativePath := chi.URLParam(r, "*")
+	if relativePath == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "relative_path is required"})
+		return
+	}
+	// Guard against path traversal regardless of how the client encodes it.
+	if strings.Contains(relativePath, "..") || strings.Contains(filepath.Clean("/"+relativePath), "..") {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid relative_path"})
+		return
+	}
+
+	checksum := r.Header.Get("X-Checksum-SHA256")
+	if checksum == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "X-Checksum-SHA256 header is required"})
+		return
+	}
+
+	// X-File-Size carries the byte count. Content-Length is unreliable because
+	// Node.js strips it when piping a stream, even if set explicitly.
+	fileSizeStr := r.Header.Get("X-File-Size")
+	fileSize, fileSizeErr := strconv.ParseInt(fileSizeStr, 10, 64)
+	if fileSizeErr != nil || fileSize < 0 {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "X-File-Size header is required and must be a non-negative integer"})
+		return
+	}
+
+	// Skip upload when the file hasn't changed.
+	existing, err := db.GetFileBackup(r.Context(), h.db, userID, relativePath)
+	if err == nil && existing.ChecksumSHA256 == checksum {
+		writeJSON(w, http.StatusOK, UploadFileResponse{
+			RelativePath:   existing.RelativePath,
+			Size:           existing.Size,
+			ChecksumSHA256: existing.ChecksumSHA256,
+			BackedUpAt:     existing.BackedUpAt,
+			Skipped:        true,
+		})
+		return
+	}
+
+	objectKey := storage.ObjectKey(userID, relativePath)
+	// fileSize may be -1 (unknown); MinIO handles that via streaming multipart upload.
+	if err := h.storage.PutObject(r.Context(), objectKey, r.Body, fileSize, "application/octet-stream"); err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "upload failed"})
+		return
+	}
+
+	backup := &models.FileBackup{
+		UserID:         userID,
+		RelativePath:   relativePath,
+		Size:           fileSize,
+		ChecksumSHA256: checksum,
+		ObjectKey:      objectKey,
+	}
+	if err := db.UpsertFileBackup(r.Context(), h.db, backup); err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to record backup"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, UploadFileResponse{
+		RelativePath:   backup.RelativePath,
+		Size:           backup.Size,
+		ChecksumSHA256: backup.ChecksumSHA256,
+		BackedUpAt:     backup.BackedUpAt,
+		Skipped:        false,
+	})
+}
+
+// GetFileBackup handles GET /api/files/backup/*.
+// Streams the backed-up file bytes from object storage to the client.
+func (h *Handler) GetFileBackup(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+	relativePath := chi.URLParam(r, "*")
+
+	if relativePath == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "relative_path is required"})
+		return
+	}
+	if strings.Contains(relativePath, "..") || strings.Contains(filepath.Clean("/"+relativePath), "..") {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid relative_path"})
+		return
+	}
+
+	backup, err := db.GetFileBackup(r.Context(), h.db, userID, relativePath)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "file not backed up"})
+		} else {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve backup record"})
+		}
+		return
+	}
+
+	reader, size, err := h.storage.GetObject(r.Context(), backup.ObjectKey)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve file"})
+		return
+	}
+	defer reader.Close()
+
+	fileName := filepath.Base(relativePath)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.WriteHeader(http.StatusOK)
+	io.Copy(w, reader) //nolint:errcheck — response already started, can't change status
 }
 
 // ---- Helpers ----

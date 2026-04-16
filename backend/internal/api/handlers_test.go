@@ -16,13 +16,13 @@ import (
 // Safe for endpoints that do not touch the DB or storage: /api/health, /api/session.
 func newTestRouter() http.Handler {
 	svc := session.NewService("test-secret-for-unit-tests")
-	return NewRouter(nil, svc)
+	return NewRouter(nil, svc, nil)
 }
 
 // newTestRouterWithSvc returns a router and the session service for token creation.
 func newTestRouterWithSvc() (http.Handler, *session.Service) {
 	svc := session.NewService("test-secret-for-unit-tests")
-	return NewRouter(nil, svc), svc
+	return NewRouter(nil, svc, nil), svc
 }
 
 func TestGetHealth(t *testing.T) {
@@ -173,6 +173,8 @@ func TestFileEndpoints_RequireAuth(t *testing.T) {
 		{http.MethodPut, "/api/files/path"},
 		{http.MethodGet, "/api/files/"},
 		{http.MethodPut, "/api/files/sync"},
+		{http.MethodPut, "/api/files/backup/some/file.txt"},
+		{http.MethodGet, "/api/files/backup/some/file.txt"},
 	}
 
 	for _, ep := range endpoints {
@@ -198,6 +200,91 @@ func TestFileEndpoints_InvalidToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
+// ---- Backup endpoint validation tests ----
+// These tests confirm that validation fires before any DB or storage access.
+
+func TestUploadEndpoint_MissingChecksumHeader(t *testing.T) {
+	r, svc := newTestRouterWithSvc()
+	token, err := svc.CreateAccessToken(1, "user@example.com")
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/files/backup/test.txt", nil)
+	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
+	req.Header.Set("X-File-Size", "100")
+	// X-Checksum-SHA256 intentionally omitted
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error, "X-Checksum-SHA256")
+}
+
+func TestUploadEndpoint_MissingFileSizeHeader(t *testing.T) {
+	r, svc := newTestRouterWithSvc()
+	token, err := svc.CreateAccessToken(1, "user@example.com")
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/files/backup/test.txt", nil)
+	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
+	req.Header.Set("X-Checksum-SHA256", "abc123")
+	// X-File-Size intentionally omitted
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error, "X-File-Size")
+}
+
+func TestUploadEndpoint_PathTraversal(t *testing.T) {
+	r, svc := newTestRouterWithSvc()
+	token, err := svc.CreateAccessToken(1, "user@example.com")
+	require.NoError(t, err)
+
+	for _, path := range []string{"../etc/passwd", "foo/../bar/baz", "a/../../secret"} {
+		req := httptest.NewRequest(http.MethodPut, "/api/files/backup/"+path, nil)
+		req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
+		req.Header.Set("X-Checksum-SHA256", "abc123")
+		req.Header.Set("X-File-Size", "10")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "path %q should be rejected", path)
+	}
+}
+
+func TestUploadEndpoint_EmptyPath(t *testing.T) {
+	r, svc := newTestRouterWithSvc()
+	token, err := svc.CreateAccessToken(1, "user@example.com")
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/files/backup/", nil)
+	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
+	req.Header.Set("X-Checksum-SHA256", "abc123")
+	req.Header.Set("X-File-Size", "10")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestDownloadEndpoint_PathTraversal(t *testing.T) {
+	r, svc := newTestRouterWithSvc()
+	token, err := svc.CreateAccessToken(1, "user@example.com")
+	require.NoError(t, err)
+
+	for _, path := range []string{"../etc/passwd", "foo/../bar", "a/../../secret"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/files/backup/"+path, nil)
+		req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "path %q should be rejected", path)
+	}
+}
 
 func TestSessionSvc_AccessTokenRoundtrip(t *testing.T) {
 	svc := session.NewService("unit-test-secret")

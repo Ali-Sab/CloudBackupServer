@@ -26,9 +26,43 @@
 
 'use strict';
 
+// ---- Pure / testable functions ------------------------------------------
+
+/**
+ * Compute a backup result summary from an array of per-file upload outcomes.
+ * Pure function — no DOM or IPC dependencies.
+ *
+ * @param {Array<{error: string|null, skipped: boolean}>} results
+ * @returns {{ message: string, type: 'success'|'error' }|null}
+ *   null when the array is empty (nothing to report).
+ */
+function buildBackupSummary(results) {
+  var uploaded = 0, skipped = 0, failed = 0;
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    if (r.error) { failed++; }
+    else if (r.skipped) { skipped++; }
+    else { uploaded++; }
+  }
+  var parts = [];
+  if (uploaded > 0) parts.push(uploaded + ' uploaded');
+  if (skipped > 0) parts.push(skipped + ' unchanged');
+  if (failed > 0) parts.push(failed + ' failed');
+  if (parts.length === 0) return null;
+  return { message: 'Backup: ' + parts.join(', '), type: failed > 0 ? 'error' : 'success' };
+}
+
+// ---- Exports (for Jest) -------------------------------------------------
+
+if (typeof module !== 'undefined') {
+  module.exports = { buildBackupSummary };
+}
+
+// ---- Browser / Electron UI ----------------------------------------------
+
 (function () {
 
-  if (typeof document === 'undefined' || typeof window === 'undefined') return;
+  if (typeof document === 'undefined' || typeof window === 'undefined' || window._testMode) return;
 
   const electronAPI = window.electronAPI;
 
@@ -44,8 +78,10 @@
   const expandedPaths = new Set();
 
   // Register the live-watch listener once at module startup.
+  // skipUpload: true — live-watch refreshes only update the metadata view.
+  // File content uploads are triggered by explicit user-initiated syncs only.
   electronAPI.onDirectoryChange(function () {
-    if (currentPath) refreshDirectory(currentPath, { silent: true });
+    if (currentPath) refreshDirectory(currentPath, { silent: true, skipUpload: true });
   });
 
   // ---- Public interface ---------------------------------------------------
@@ -61,8 +97,9 @@
         const data = await resp.json();
         currentPath = data.path;
         document.getElementById('current-path').textContent = data.path;
+        setBackupButtonEnabled(true);
         await electronAPI.watchDirectory(data.path);
-        await refreshDirectory(data.path, { silent: true });
+        await refreshDirectory(data.path, { silent: true, skipUpload: true });
       }
     } catch {
       // Not critical — user can still pick a folder manually.
@@ -92,7 +129,10 @@
           <div id="breadcrumb" class="breadcrumb-area">
             <h2>Local Folder</h2>
           </div>
-          <button id="select-dir-btn">Select Folder</button>
+          <div class="file-browser-actions">
+            <button id="backup-now-btn" disabled>Backup Now</button>
+            <button id="select-dir-btn">Select Folder</button>
+          </div>
         </div>
         <p id="current-path" class="file-current-path"></p>
         <ul id="file-list" class="file-list">
@@ -101,6 +141,12 @@
       </div>
     `;
     document.getElementById('select-dir-btn').addEventListener('click', handleSelectDirectory);
+    document.getElementById('backup-now-btn').addEventListener('click', backupNow);
+  }
+
+  function setBackupButtonEnabled(enabled) {
+    const btn = document.getElementById('backup-now-btn');
+    if (btn) btn.disabled = !enabled;
   }
 
   // ---- Select & refresh ---------------------------------------------------
@@ -113,6 +159,7 @@
     viewStack = [];
     expandedPaths.clear();
     document.getElementById('current-path').textContent = dirPath;
+    setBackupButtonEnabled(true);
     await electronAPI.watchDirectory(dirPath);
 
     try {
@@ -123,6 +170,34 @@
     }
 
     await refreshDirectory(dirPath);
+  }
+
+  async function backupNow() {
+    if (!currentPath) return;
+
+    const btn = document.getElementById('backup-now-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Backing up…'; }
+
+    let entries;
+    try {
+      entries = await electronAPI.readDirectory(currentPath);
+    } catch {
+      window.UI.toast('Could not read folder', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Backup Now'; }
+      return;
+    }
+
+    allEntries = entries;
+    renderView();
+
+    const fileEntries = entries.filter(function (e) { return !e.isDirectory; });
+    if (fileEntries.length === 0) {
+      window.UI.toast('No files to back up');
+    } else {
+      await uploadFiles(currentPath, fileEntries);
+    }
+
+    if (btn) { btn.disabled = false; btn.textContent = 'Backup Now'; }
   }
 
   /**
@@ -145,7 +220,7 @@
     allEntries = entries;
     renderView();
 
-    // Sync to backend (non-blocking — failures don't affect the UI).
+    // Sync metadata to backend (non-blocking — failures don't affect the UI).
     const files = entries.map(function (e) {
       return {
         name: e.name,
@@ -164,6 +239,51 @@
     } catch {
       // Sync failures are non-fatal.
     }
+
+    // Upload file content for non-directory entries.
+    // Only on explicit syncs — live-watch refreshes pass skipUpload: true.
+    if (!opts?.skipUpload) {
+      const fileEntries = entries.filter(function (e) { return !e.isDirectory; });
+      uploadFiles(dirPath, fileEntries).catch(function () {});
+    }
+  }
+
+  /**
+   * Upload file content for each entry to the backend backup endpoint.
+   * Runs sequentially to avoid saturating the connection on large directories.
+   * Shows a single summary toast when done.
+   *
+   * @param {string} rootPath
+   * @param {Array} fileEntries  - non-directory entries from readDirectory
+   */
+  async function uploadFiles(rootPath, fileEntries) {
+    if (fileEntries.length === 0) return;
+
+    const apiBaseUrl = window.APIClient.BASE_URL;
+    const accessToken = window.TokenStore.getAccessToken();
+    const results = [];
+
+    for (const entry of fileEntries) {
+      let result;
+      try {
+        result = await electronAPI.uploadFile(
+          rootPath,
+          entry.relativePath,
+          apiBaseUrl,
+          accessToken
+        );
+        if (result.error) {
+          console.warn('Backup upload failed for', entry.relativePath + ':', result.error);
+        }
+      } catch (err) {
+        console.warn('Backup upload failed for', entry.relativePath + ':', err.message);
+        result = { error: err.message, skipped: false };
+      }
+      results.push({ error: result.error || null, skipped: !!result.skipped });
+    }
+
+    const summary = buildBackupSummary(results);
+    if (summary) window.UI.toast(summary.message, summary.type);
   }
 
   // ---- View rendering -----------------------------------------------------
