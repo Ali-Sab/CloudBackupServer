@@ -31,7 +31,7 @@ info:
     and returns a 404 when the email is not found (anti-enumeration is disabled).
     Both behaviours will be reversed before production: the token will be delivered by email
     and the response will look identical regardless of whether the email exists.
-  version: 0.2.6
+  version: 0.2.7
   license:
     name: GNU General Public License v3.0
     url: https://www.gnu.org/licenses/gpl-3.0.html
@@ -743,7 +743,7 @@ components:
 
     UploadFileResponse:
       type: object
-      required: [relative_path, size, checksum_sha256, backed_up_at, skipped]
+      required: [relative_path, size, checksum_sha256, backed_up_at, version, skipped]
       properties:
         relative_path:
           type: string
@@ -761,6 +761,13 @@ components:
           type: string
           format: date-time
           example: "2026-04-10T14:32:00Z"
+        version:
+          type: integer
+          description: |
+            Monotonically increasing counter for this file. Starts at 1 on the first
+            backup; increments by 1 each time the file content changes and is re-uploaded.
+            Unchanged on a skipped upload.
+          example: 3
         skipped:
           type: boolean
           description: true when the checksum matched and no upload occurred

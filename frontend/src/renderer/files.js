@@ -201,11 +201,13 @@ if (typeof module !== 'undefined') {
   }
 
   /**
-   * Read the full directory tree from disk, cache entries, sync to backend,
+   * Read the full directory tree from disk, cache entries, sync metadata to backend,
    * then re-render the current view (breadcrumb + file list).
    *
+   * File content uploads are never triggered here — use the Backup Now button.
+   *
    * @param {string} dirPath
-   * @param {{ silent?: boolean }} [opts]  silent = no sync toast (used on restore / live watch)
+   * @param {{ silent?: boolean }} [opts]  silent = no sync toast
    */
   async function refreshDirectory(dirPath, opts) {
     let entries;
@@ -238,13 +240,6 @@ if (typeof module !== 'undefined') {
       }
     } catch {
       // Sync failures are non-fatal.
-    }
-
-    // Upload file content for non-directory entries.
-    // Only on explicit syncs — live-watch refreshes pass skipUpload: true.
-    if (!opts?.skipUpload) {
-      const fileEntries = entries.filter(function (e) { return !e.isDirectory; });
-      uploadFiles(dirPath, fileEntries).catch(function () {});
     }
   }
 

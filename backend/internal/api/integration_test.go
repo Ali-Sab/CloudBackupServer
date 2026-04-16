@@ -739,6 +739,7 @@ func TestIntegration_UploadFile_HappyPath(t *testing.T) {
 	assert.Equal(t, "notes.txt", result.RelativePath)
 	assert.Equal(t, int64(len(content)), result.Size)
 	assert.Equal(t, checksum, result.ChecksumSHA256)
+	assert.Equal(t, 1, result.Version)
 	assert.False(t, result.Skipped)
 
 	// Verify object landed in the store
@@ -772,6 +773,7 @@ func TestIntegration_UploadFile_SkipsIfChecksumMatches(t *testing.T) {
 	var result api.UploadFileResponse
 	decodeJSON(t, resp, &result)
 	assert.True(t, result.Skipped, "second upload with same checksum must be skipped")
+	assert.Equal(t, 1, result.Version, "version must not increment on a skipped upload")
 
 	// Only one object in store (not two)
 	store.mu.Lock()
@@ -802,6 +804,8 @@ func TestIntegration_UploadFile_OverwritesOnChecksumChange(t *testing.T) {
 	assert.False(t, r2.Skipped)
 	assert.Equal(t, "checksum-v2", r2.ChecksumSHA256)
 	assert.True(t, r2.BackedUpAt.After(r1.BackedUpAt) || r2.BackedUpAt.Equal(r1.BackedUpAt))
+	assert.Equal(t, 1, r1.Version)
+	assert.Equal(t, 2, r2.Version, "version must increment when file content changes")
 }
 
 func TestIntegration_DownloadFile_HappyPath(t *testing.T) {
@@ -894,6 +898,7 @@ func TestIntegration_UploadFile_ZeroBytes(t *testing.T) {
 	var result api.UploadFileResponse
 	decodeJSON(t, resp, &result)
 	assert.Equal(t, int64(0), result.Size)
+	assert.Equal(t, 1, result.Version)
 	assert.False(t, result.Skipped)
 }
 

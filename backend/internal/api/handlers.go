@@ -152,7 +152,8 @@ type UploadFileResponse struct {
 	Size           int64     `json:"size"`
 	ChecksumSHA256 string    `json:"checksum_sha256"`
 	BackedUpAt     time.Time `json:"backed_up_at"`
-	Skipped        bool      `json:"skipped"` // true when checksum matched — no upload occurred
+	Version        int       `json:"version"`  // increments on each content change
+	Skipped        bool      `json:"skipped"`  // true when checksum matched — no upload occurred
 }
 
 // ---- Handlers ----
@@ -632,6 +633,7 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 			Size:           existing.Size,
 			ChecksumSHA256: existing.ChecksumSHA256,
 			BackedUpAt:     existing.BackedUpAt,
+			Version:        existing.Version,
 			Skipped:        true,
 		})
 		return
@@ -661,6 +663,7 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 		Size:           backup.Size,
 		ChecksumSHA256: backup.ChecksumSHA256,
 		BackedUpAt:     backup.BackedUpAt,
+		Version:        backup.Version,
 		Skipped:        false,
 	})
 }
