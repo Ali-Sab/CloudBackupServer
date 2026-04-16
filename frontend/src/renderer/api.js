@@ -4,8 +4,6 @@
  * This is the only file that knows URL strings.
  * All functions return a raw fetch Response so callers can check .ok and call .json().
  * UI modules never call APIClient directly — they go through this layer.
- *
- * Future endpoints (files, sync) go here when backend routes exist.
  */
 
 'use strict';
@@ -15,7 +13,8 @@
   const _mod = (typeof require !== 'undefined' && typeof module !== 'undefined')
     ? require('./api-client')
     : null;
-  const APIClient = _mod ? _mod.APIClient : window.APIClient;
+  const APIClient   = _mod ? _mod.APIClient   : window.APIClient;
+  const TokenStore  = _mod ? _mod.TokenStore  : window.TokenStore;
 
   const API = {
 
@@ -35,8 +34,9 @@
       return APIClient.post('/api/auth/register', { email, password });
     },
 
-    logout(refreshToken) {
-      return APIClient.post('/api/auth/logout', { refresh_token: refreshToken });
+    logout() {
+      const refreshToken = TokenStore.getRefreshToken();
+      return APIClient.post('/api/auth/logout', refreshToken ? { refresh_token: refreshToken } : {});
     },
 
     forgotPassword(email) {
@@ -73,6 +73,18 @@
      */
     syncFiles(files) {
       return APIClient.put('/api/files/sync', { files });
+    },
+
+    // ---- Backup ----
+
+    /**
+     * Download a backed-up file. Returns a raw Response with the binary body.
+     * Use response.blob() or response.arrayBuffer() to access the bytes.
+     * @param {string} relativePath  - e.g. "photos/2024/img.jpg"
+     */
+    downloadFile(relativePath) {
+      const encoded = relativePath.split('/').map(encodeURIComponent).join('/');
+      return APIClient.request('/api/files/backup/' + encoded);
     },
   };
 

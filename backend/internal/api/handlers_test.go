@@ -12,8 +12,8 @@ import (
 	"github.com/ali-sab/cloudbackupserver/backend/internal/session"
 )
 
-// newTestRouter returns a router with a nil DB pool.
-// Safe for endpoints that do not touch the DB: /api/health, /api/session.
+// newTestRouter returns a router with nil DB and storage.
+// Safe for endpoints that do not touch the DB or storage: /api/health, /api/session.
 func newTestRouter() http.Handler {
 	svc := session.NewService("test-secret-for-unit-tests")
 	return NewRouter(nil, svc)
@@ -60,7 +60,7 @@ func TestGetSession_InvalidToken(t *testing.T) {
 	r := newTestRouter()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/session", nil)
-	req.Header.Set("Authorization", "Bearer not-a-real-jwt")
+	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: "not-a-real-jwt"})
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -79,7 +79,7 @@ func TestGetSession_WrongSigningKey(t *testing.T) {
 
 	r := newTestRouter()
 	req := httptest.NewRequest(http.MethodGet, "/api/session", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -97,7 +97,7 @@ func TestGetSession_ValidAccessToken(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/session", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -111,21 +111,20 @@ func TestGetSession_ValidAccessToken(t *testing.T) {
 	assert.Equal(t, "bob@example.com", resp.User.Email)
 }
 
-func TestGetSession_MalformedAuthHeader(t *testing.T) {
+func TestGetSession_NoCookie(t *testing.T) {
 	r := newTestRouter()
 
-	for _, header := range []string{"Token abc", "Bearer", "Basic dXNlcjpwYXNz"} {
-		req := httptest.NewRequest(http.MethodGet, "/api/session", nil)
-		req.Header.Set("Authorization", header)
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
+	// Sending an Authorization header must NOT be treated as a session anymore.
+	req := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	req.Header.Set("Authorization", "Bearer some-token")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code, "header: %s", header)
+	assert.Equal(t, http.StatusOK, rec.Code)
 
-		var resp SessionResponse
-		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-		assert.False(t, resp.LoggedIn, "header: %s", header)
-	}
+	var resp SessionResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.False(t, resp.LoggedIn)
 }
 
 func TestCORSPreflightRequest(t *testing.T) {
@@ -138,7 +137,8 @@ func TestCORSPreflightRequest(t *testing.T) {
 	r.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "http://localhost:3000", rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "true", rec.Header().Get("Access-Control-Allow-Credentials"))
 }
 
 func TestSessionSvc_GenerateAndHashRefreshToken(t *testing.T) {
@@ -191,12 +191,13 @@ func TestFileEndpoints_InvalidToken(t *testing.T) {
 	r := newTestRouter()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/files/path", nil)
-	req.Header.Set("Authorization", "Bearer not-a-valid-jwt")
+	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: "not-a-valid-jwt"})
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
+
 
 func TestSessionSvc_AccessTokenRoundtrip(t *testing.T) {
 	svc := session.NewService("unit-test-secret")
