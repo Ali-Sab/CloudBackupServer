@@ -44,6 +44,7 @@ type WatchedPath struct {
 // FileBackup represents a successfully uploaded backup of a single file.
 // Records are keyed by (user_id, relative_path) and survive metadata syncs —
 // they are only removed when the user changes their watched path.
+// Version increments each time the file content changes and is re-backed-up.
 type FileBackup struct {
 	ID             int64     `json:"id"`
 	UserID         int64     `json:"user_id"`
@@ -52,6 +53,7 @@ type FileBackup struct {
 	ChecksumSHA256 string    `json:"checksum_sha256"`
 	ObjectKey      string    `json:"object_key"`
 	BackedUpAt     time.Time `json:"backed_up_at"`
+	Version        int       `json:"version"`
 }
 
 // WatchedFile represents a single file or directory entry within a watched path.

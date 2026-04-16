@@ -330,7 +330,7 @@ func GetWatchedFiles(ctx context.Context, pool *pgxpool.Pool, pathID int64) ([]m
 
 // UpsertFileBackup inserts or updates a backup record for a single file.
 // The unique constraint is (user_id, relative_path) — safe to call repeatedly.
-// On conflict the record is updated with the new checksum, size, object_key, and backed_up_at.
+// On conflict the record is updated and Version is incremented by 1.
 func UpsertFileBackup(ctx context.Context, pool *pgxpool.Pool, b *models.FileBackup) error {
 	err := pool.QueryRow(ctx,
 		`INSERT INTO file_backups (user_id, relative_path, size, checksum_sha256, object_key)
@@ -339,10 +339,11 @@ func UpsertFileBackup(ctx context.Context, pool *pgxpool.Pool, b *models.FileBac
 		   SET size            = EXCLUDED.size,
 		       checksum_sha256 = EXCLUDED.checksum_sha256,
 		       object_key      = EXCLUDED.object_key,
-		       backed_up_at    = NOW()
-		 RETURNING id, backed_up_at`,
+		       backed_up_at    = NOW(),
+		       version         = file_backups.version + 1
+		 RETURNING id, backed_up_at, version`,
 		b.UserID, b.RelativePath, b.Size, b.ChecksumSHA256, b.ObjectKey,
-	).Scan(&b.ID, &b.BackedUpAt)
+	).Scan(&b.ID, &b.BackedUpAt, &b.Version)
 	if err != nil {
 		return fmt.Errorf("upserting file backup: %w", err)
 	}
@@ -354,10 +355,10 @@ func UpsertFileBackup(ctx context.Context, pool *pgxpool.Pool, b *models.FileBac
 func GetFileBackup(ctx context.Context, pool *pgxpool.Pool, userID int64, relativePath string) (*models.FileBackup, error) {
 	b := &models.FileBackup{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, user_id, relative_path, size, checksum_sha256, object_key, backed_up_at
+		`SELECT id, user_id, relative_path, size, checksum_sha256, object_key, backed_up_at, version
 		 FROM file_backups WHERE user_id = $1 AND relative_path = $2`,
 		userID, relativePath,
-	).Scan(&b.ID, &b.UserID, &b.RelativePath, &b.Size, &b.ChecksumSHA256, &b.ObjectKey, &b.BackedUpAt)
+	).Scan(&b.ID, &b.UserID, &b.RelativePath, &b.Size, &b.ChecksumSHA256, &b.ObjectKey, &b.BackedUpAt, &b.Version)
 	if err != nil {
 		return nil, fmt.Errorf("getting file backup: %w", err)
 	}
