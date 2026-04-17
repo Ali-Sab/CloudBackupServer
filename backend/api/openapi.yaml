@@ -31,7 +31,7 @@ info:
     and returns a 404 when the email is not found (anti-enumeration is disabled).
     Both behaviours will be reversed before production: the token will be delivered by email
     and the response will look identical regardless of whether the email exists.
-  version: 0.2.7
+  version: 0.2.8
   license:
     name: GNU General Public License v3.0
     url: https://www.gnu.org/licenses/gpl-3.0.html
@@ -400,6 +400,31 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/files/backups:
+    get:
+      summary: List all backed-up files for the current user
+      description: Returns every backup record for the authenticated user, ordered by relative_path. Used by the Electron client to seed per-file status indicators on startup.
+      operationId: listFileBackups
+      tags: [Backup]
+      security:
+        - CookieAuth: []
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Backup records
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [backups]
+                properties:
+                  backups:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FileBackupRecord"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /api/files/backup/{relative_path}:
     parameters:
       - name: relative_path
@@ -740,6 +765,28 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/WatchedFile"
+
+    FileBackupRecord:
+      type: object
+      required: [id, relative_path, size, checksum_sha256, backed_up_at, version]
+      properties:
+        id:
+          type: integer
+          format: int64
+        relative_path:
+          type: string
+          example: photos/2024/img.jpg
+        size:
+          type: integer
+          format: int64
+        checksum_sha256:
+          type: string
+        backed_up_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          example: 2
 
     UploadFileResponse:
       type: object

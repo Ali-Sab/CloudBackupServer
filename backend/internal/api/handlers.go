@@ -146,6 +146,11 @@ type WatchedFilesResponse struct {
 	Files []models.WatchedFile `json:"files"`
 }
 
+// FileBackupsResponse is returned by GET /api/files/backups.
+type FileBackupsResponse struct {
+	Backups []models.FileBackup `json:"backups"`
+}
+
 // UploadFileResponse is returned by PUT /api/files/backup/*.
 type UploadFileResponse struct {
 	RelativePath   string    `json:"relative_path"`
@@ -591,6 +596,18 @@ func (h *Handler) PutSyncFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- Backup handlers ----
+
+// GetFileBackups handles GET /api/files/backups.
+// Returns all backup records for the authenticated user.
+func (h *Handler) GetFileBackups(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+	backups, err := db.GetFileBackupsByUserID(r.Context(), h.db, userID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to load backups"})
+		return
+	}
+	writeJSON(w, http.StatusOK, FileBackupsResponse{Backups: backups})
+}
 
 // PutFileBackup handles PUT /api/files/backup/*.
 // Streams the request body into object storage for the authenticated user.

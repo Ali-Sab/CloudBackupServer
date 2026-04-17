@@ -37,4 +37,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   uploadFile: (rootPath, relativePath, apiBaseUrl, accessToken) =>
     ipcRenderer.invoke('upload-file', { rootPath, relativePath, apiBaseUrl, accessToken }),
+
+  /**
+   * Compute the SHA-256 checksum of a file within the watched directory.
+   * Streams the file — does not buffer it in memory.
+   *
+   * @param {string} rootPath      - Absolute path to the watched directory root
+   * @param {string} relativePath  - POSIX relative path within the root
+   * @returns {Promise<{checksum: string}|{error: string}>}
+   */
+  checksumFile: (rootPath, relativePath) =>
+    ipcRenderer.invoke('checksum-file', { rootPath, relativePath }),
 });

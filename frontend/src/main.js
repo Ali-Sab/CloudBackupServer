@@ -98,6 +98,31 @@ ipcMain.handle('unwatch-directory', () => {
 
 // ---- IPC: file backup upload ----
 
+// Streams a file through SHA-256 and returns the hex digest.
+// Never loads the full file into memory.
+function computeFileChecksum(absPath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(absPath);
+    stream.on('data', chunk => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('error', reject);
+  });
+}
+
+// Returns the SHA-256 checksum of a file within the watched directory.
+// Returns { checksum: string } on success, or { error: string } on failure.
+ipcMain.handle('checksum-file', async (_event, { rootPath, relativePath }) => {
+  const sep = path.sep;
+  const absPath = path.join(rootPath, relativePath.split('/').join(sep));
+  try {
+    const checksum = await computeFileChecksum(absPath);
+    return { checksum };
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
 // Streams a single file to the backend backup endpoint.
 // Computes SHA-256 by streaming the file (no buffering), then streams the bytes
 // directly into the HTTP request body via fs.createReadStream().pipe(req).
@@ -120,13 +145,7 @@ ipcMain.handle('upload-file', async (_event, { rootPath, relativePath, apiBaseUr
   // Stream the file through SHA-256 to get checksum — never loaded fully into memory.
   let checksum;
   try {
-    checksum = await new Promise((resolve, reject) => {
-      const hash = crypto.createHash('sha256');
-      const stream = fs.createReadStream(absPath);
-      stream.on('data', chunk => hash.update(chunk));
-      stream.on('end', () => resolve(hash.digest('hex')));
-      stream.on('error', reject);
-    });
+    checksum = await computeFileChecksum(absPath);
   } catch (e) {
     return { error: `Checksum failed: ${e.message}` };
   }

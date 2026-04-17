@@ -77,6 +77,11 @@
 
     // ---- Backup ----
 
+    /** Returns { backups: [...] } — all backup records for the user. */
+    getFileBackups() {
+      return APIClient.request('/api/files/backups');
+    },
+
     /**
      * Download a backed-up file. Returns a raw Response with the binary body.
      * Use response.blob() or response.arrayBuffer() to access the bytes.

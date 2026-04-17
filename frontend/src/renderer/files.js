@@ -77,6 +77,11 @@ if (typeof module !== 'undefined') {
   // Which relative-paths are currently expanded inline (persisted across refreshes).
   const expandedPaths = new Set();
 
+  // Per-file backup status. Keys are relativePath strings.
+  // Values: 'uploading' | 'done' | 'error'
+  // Files absent from the map have no known status (not yet backed up this session).
+  const uploadStatus = new Map();
+
   // Register the live-watch listener once at module startup.
   // skipUpload: true — live-watch refreshes only update the metadata view.
   // File content uploads are triggered by explicit user-initiated syncs only.
@@ -99,7 +104,8 @@ if (typeof module !== 'undefined') {
         document.getElementById('current-path').textContent = data.path;
         setBackupButtonEnabled(true);
         await electronAPI.watchDirectory(data.path);
-        await refreshDirectory(data.path, { silent: true, skipUpload: true });
+        await refreshDirectory(data.path, { silent: true });
+        loadBackupStatuses(); // fire-and-forget: scans checksums progressively in background
       }
     } catch {
       // Not critical — user can still pick a folder manually.
@@ -114,7 +120,32 @@ if (typeof module !== 'undefined') {
     allEntries = [];
     viewStack = [];
     expandedPaths.clear();
+    uploadStatus.clear();
     electronAPI.unwatchDirectory();
+  }
+
+  // Fetch backup records from the server, then verify each file's local checksum.
+  // Sets 'done' if the checksum matches, 'outdated' if the file has changed since
+  // the last backup, or leaves the entry absent if the file can't be read locally.
+  // Re-renders progressively after each file so icons appear as scanning completes.
+  async function loadBackupStatuses() {
+    if (!currentPath) return;
+    try {
+      const resp = await window.API.getFileBackups();
+      if (!resp.ok) return;
+      const data = await resp.json();
+      for (const b of data.backups) {
+        const result = await electronAPI.checksumFile(currentPath, b.relative_path);
+        if (result.error) continue; // file missing locally — skip
+        uploadStatus.set(
+          b.relative_path,
+          result.checksum === b.checksum_sha256 ? 'done' : 'outdated'
+        );
+        renderView();
+      }
+    } catch {
+      // Non-critical — status icons just won't show for existing backups.
+    }
   }
 
   // ---- Scaffold -----------------------------------------------------------
@@ -158,6 +189,7 @@ if (typeof module !== 'undefined') {
     currentPath = dirPath;
     viewStack = [];
     expandedPaths.clear();
+    uploadStatus.clear();
     document.getElementById('current-path').textContent = dirPath;
     setBackupButtonEnabled(true);
     await electronAPI.watchDirectory(dirPath);
@@ -259,6 +291,9 @@ if (typeof module !== 'undefined') {
     const results = [];
 
     for (const entry of fileEntries) {
+      uploadStatus.set(entry.relativePath, 'uploading');
+      renderView();
+
       let result;
       try {
         result = await electronAPI.uploadFile(
@@ -274,6 +309,10 @@ if (typeof module !== 'undefined') {
         console.warn('Backup upload failed for', entry.relativePath + ':', err.message);
         result = { error: err.message, skipped: false };
       }
+
+      uploadStatus.set(entry.relativePath, result.error ? 'error' : 'done');
+      renderView();
+
       results.push({ error: result.error || null, skipped: !!result.skipped });
     }
 
@@ -543,9 +582,34 @@ if (typeof module !== 'undefined') {
         meta.className = 'file-meta';
         meta.textContent = entry ? formatSize(entry.size) : '';
 
+        const status = uploadStatus.get(relPath);
+        const statusEl = document.createElement('span');
+        if (status === 'uploading') {
+          statusEl.className = 'backup-status uploading';
+          statusEl.setAttribute('aria-label', 'Uploading…');
+        } else if (status === 'done') {
+          statusEl.className = 'backup-status done';
+          statusEl.textContent = '✓';
+          statusEl.setAttribute('aria-label', 'Backed up');
+        } else if (status === 'outdated') {
+          statusEl.className = 'backup-status outdated';
+          statusEl.textContent = '↑';
+          statusEl.setAttribute('aria-label', 'Local file has changed — backup outdated');
+        } else if (status === 'error') {
+          statusEl.className = 'backup-status error';
+          statusEl.textContent = '✗';
+          statusEl.setAttribute('aria-label', 'Backup failed');
+        } else {
+          // No backup record — file is local-only.
+          statusEl.className = 'backup-status local-only';
+          statusEl.textContent = '○';
+          statusEl.setAttribute('aria-label', 'Not backed up');
+        }
+
         li.appendChild(icon);
         li.appendChild(nameEl);
         li.appendChild(meta);
+        li.appendChild(statusEl);
         ul.appendChild(li);
       }
     }
