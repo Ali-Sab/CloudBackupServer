@@ -48,4 +48,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   checksumFile: (rootPath, relativePath) =>
     ipcRenderer.invoke('checksum-file', { rootPath, relativePath }),
+
+  /**
+   * Write bytes to a file within the watched directory, creating parent dirs as needed.
+   * @param {string} rootPath      - Absolute path to the watched directory root
+   * @param {string} relativePath  - POSIX relative path within the root
+   * @param {ArrayBuffer} buffer   - File contents
+   * @returns {Promise<{}|{error: string}>}
+   */
+  saveFile: (rootPath, relativePath, buffer) =>
+    ipcRenderer.invoke('save-file', { rootPath, relativePath, buffer }),
 });

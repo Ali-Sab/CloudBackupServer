@@ -197,6 +197,21 @@ ipcMain.handle('upload-file', async (_event, { rootPath, relativePath, apiBaseUr
   });
 });
 
+// Writes downloaded bytes to a file within the watched directory root.
+// Creates intermediate directories as needed.
+// Returns {} on success or { error: string } on failure.
+ipcMain.handle('save-file', async (_event, { rootPath, relativePath, buffer }) => {
+  const sep = path.sep;
+  const absPath = path.join(rootPath, relativePath.split('/').join(sep));
+  try {
+    fs.mkdirSync(path.dirname(absPath), { recursive: true });
+    fs.writeFileSync(absPath, Buffer.from(buffer));
+    return {};
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
 // ---- App lifecycle ----
 
 app.whenReady().then(() => {
