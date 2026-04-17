@@ -326,9 +326,6 @@ button.link-btn:hover { color: var(--color-primary); }
 .file-item.file-empty { color: var(--color-muted); font-style: italic; justify-content: center; }
 
 .backup-status {
-  flex-shrink: 0;
-  width: 18px;
-  text-align: center;
   font-size: 0.8rem;
   font-weight: 600;
 }
@@ -336,6 +333,43 @@ button.link-btn:hover { color: var(--color-primary); }
 .backup-status.outdated   { color: #f59e0b; }
 .backup-status.error      { color: var(--color-error); }
 .backup-status.local-only { color: var(--color-border); }
+
+/* Cloud-only files: exist in the cloud but not locally */
+.file-item.cloud-only .file-icon,
+.file-item.cloud-only .file-name,
+.file-item.cloud-only .file-meta { color: var(--color-muted); opacity: 0.6; }
+
+/* Invisible spacer that matches .cloud-download-btn's box dimensions.
+   Wraps status icons so all rows stay the same height. */
+.icon-slot,
+.cloud-download-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  width: 32px;
+  height: 24px;
+  margin-left: auto;
+}
+
+.icon-slot {
+  cursor: default;
+  pointer-events: none;
+}
+
+.cloud-download-btn {
+  color: var(--color-primary);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.cloud-download-btn:hover {
+  border-color: var(--color-primary);
+  background: rgba(79, 142, 247, 0.1);
+}
 .backup-status.uploading {
   display: inline-block;
   width: 12px;

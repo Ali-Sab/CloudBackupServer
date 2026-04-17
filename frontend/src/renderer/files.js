@@ -78,9 +78,13 @@ if (typeof module !== 'undefined') {
   const expandedPaths = new Set();
 
   // Per-file backup status. Keys are relativePath strings.
-  // Values: 'uploading' | 'done' | 'error'
+  // Values: 'uploading' | 'done' | 'outdated' | 'error'
   // Files absent from the map have no known status (not yet backed up this session).
   const uploadStatus = new Map();
+
+  // Backup records for files that exist in the cloud but not locally.
+  // Keys are relativePath strings; values are the raw backup record objects from the server.
+  const cloudOnlyFiles = new Map();
 
   // Register the live-watch listener once at module startup.
   // skipUpload: true — live-watch refreshes only update the metadata view.
@@ -121,6 +125,7 @@ if (typeof module !== 'undefined') {
     viewStack = [];
     expandedPaths.clear();
     uploadStatus.clear();
+    cloudOnlyFiles.clear();
     electronAPI.unwatchDirectory();
   }
 
@@ -136,11 +141,15 @@ if (typeof module !== 'undefined') {
       const data = await resp.json();
       for (const b of data.backups) {
         const result = await electronAPI.checksumFile(currentPath, b.relative_path);
-        if (result.error) continue; // file missing locally — skip
-        uploadStatus.set(
-          b.relative_path,
-          result.checksum === b.checksum_sha256 ? 'done' : 'outdated'
-        );
+        if (result.error) {
+          // File missing locally — show it as a cloud-only entry.
+          cloudOnlyFiles.set(b.relative_path, b);
+        } else {
+          uploadStatus.set(
+            b.relative_path,
+            result.checksum === b.checksum_sha256 ? 'done' : 'outdated'
+          );
+        }
         renderView();
       }
     } catch {
@@ -190,6 +199,7 @@ if (typeof module !== 'undefined') {
     viewStack = [];
     expandedPaths.clear();
     uploadStatus.clear();
+    cloudOnlyFiles.clear();
     document.getElementById('current-path').textContent = dirPath;
     setBackupButtonEnabled(true);
     await electronAPI.watchDirectory(dirPath);
@@ -332,12 +342,28 @@ if (typeof module !== 'undefined') {
     const listEl = document.getElementById('file-list');
     if (!listEl) return;
 
-    if (allEntries.length === 0) {
+    // Merge local entries with cloud-only synthetic entries for rendering.
+    const combined = allEntries.slice();
+    for (const [relPath, b] of cloudOnlyFiles) {
+      if (!combined.some(function (e) { return e.relativePath === relPath; })) {
+        const parts = relPath.split('/');
+        combined.push({
+          name: parts[parts.length - 1],
+          relativePath: relPath,
+          isDirectory: false,
+          size: b.size,
+          modified: null,
+          isCloudOnly: true,
+        });
+      }
+    }
+
+    if (combined.length === 0) {
       listEl.innerHTML = '<li class="file-item file-empty">Folder is empty</li>';
       return;
     }
 
-    const tree = buildTree(allEntries);
+    const tree = buildTree(combined);
     const viewNode = resolveViewNode(tree);
 
     listEl.innerHTML = '';
@@ -569,49 +595,91 @@ if (typeof module !== 'undefined') {
         ul.appendChild(childUl);
 
       } else {
+        const isCloudOnly = entry && entry.isCloudOnly;
+        if (isCloudOnly) li.classList.add('cloud-only');
+
         const icon = document.createElement('span');
         icon.className = 'file-icon';
         icon.textContent = '📄';
 
         const nameEl = document.createElement('span');
         nameEl.className = 'file-name';
-        nameEl.setAttribute('title', name);
+        nameEl.setAttribute('title', isCloudOnly ? name + ' — cloud only' : name);
         nameEl.innerHTML = truncateName(name, 40);
 
         const meta = document.createElement('span');
         meta.className = 'file-meta';
         meta.textContent = entry ? formatSize(entry.size) : '';
 
-        const status = uploadStatus.get(relPath);
-        const statusEl = document.createElement('span');
-        if (status === 'uploading') {
-          statusEl.className = 'backup-status uploading';
-          statusEl.setAttribute('aria-label', 'Uploading…');
-        } else if (status === 'done') {
-          statusEl.className = 'backup-status done';
-          statusEl.textContent = '✓';
-          statusEl.setAttribute('aria-label', 'Backed up');
-        } else if (status === 'outdated') {
-          statusEl.className = 'backup-status outdated';
-          statusEl.textContent = '↑';
-          statusEl.setAttribute('aria-label', 'Local file has changed — backup outdated');
-        } else if (status === 'error') {
-          statusEl.className = 'backup-status error';
-          statusEl.textContent = '✗';
-          statusEl.setAttribute('aria-label', 'Backup failed');
-        } else {
-          // No backup record — file is local-only.
-          statusEl.className = 'backup-status local-only';
-          statusEl.textContent = '○';
-          statusEl.setAttribute('aria-label', 'Not backed up');
-        }
-
         li.appendChild(icon);
         li.appendChild(nameEl);
         li.appendChild(meta);
-        li.appendChild(statusEl);
+
+        if (isCloudOnly) {
+          const dlBtn = document.createElement('button');
+          dlBtn.className = 'cloud-download-btn';
+          dlBtn.textContent = '☁';
+          dlBtn.setAttribute('title', 'Download from cloud');
+          dlBtn.addEventListener('click', function () { downloadCloudFile(relPath); });
+          li.appendChild(dlBtn);
+        } else {
+          const status = uploadStatus.get(relPath);
+          const statusEl = document.createElement('span');
+          if (status === 'uploading') {
+            statusEl.className = 'backup-status uploading';
+            statusEl.setAttribute('aria-label', 'Uploading…');
+          } else if (status === 'done') {
+            statusEl.className = 'backup-status done';
+            statusEl.textContent = '✓';
+            statusEl.setAttribute('aria-label', 'Backed up');
+          } else if (status === 'outdated') {
+            statusEl.className = 'backup-status outdated';
+            statusEl.textContent = '↑';
+            statusEl.setAttribute('aria-label', 'Local file has changed — backup outdated');
+          } else if (status === 'error') {
+            statusEl.className = 'backup-status error';
+            statusEl.textContent = '✗';
+            statusEl.setAttribute('aria-label', 'Backup failed');
+          } else {
+            statusEl.className = 'backup-status local-only';
+            statusEl.textContent = '○';
+            statusEl.setAttribute('aria-label', 'Not backed up');
+          }
+          const slot = document.createElement('button');
+          slot.className = 'icon-slot';
+          slot.setAttribute('type', 'button');
+          slot.setAttribute('tabindex', '-1');
+          slot.appendChild(statusEl);
+          li.appendChild(slot);
+        }
+
         ul.appendChild(li);
       }
+    }
+  }
+
+  // ---- Cloud download -----------------------------------------------------
+
+  async function downloadCloudFile(relativePath) {
+    if (!currentPath) return;
+    try {
+      const resp = await window.API.downloadFile(relativePath);
+      if (!resp.ok) {
+        window.UI.toast('Download failed: HTTP ' + resp.status, 'error');
+        return;
+      }
+      const buffer = await resp.arrayBuffer();
+      const result = await electronAPI.saveFile(currentPath, relativePath, buffer);
+      if (result.error) {
+        window.UI.toast('Could not save file: ' + result.error, 'error');
+        return;
+      }
+      cloudOnlyFiles.delete(relativePath);
+      uploadStatus.set(relativePath, 'done');
+      await refreshDirectory(currentPath, { silent: true });
+      window.UI.toast('Downloaded: ' + relativePath.split('/').pop(), 'success');
+    } catch (e) {
+      window.UI.toast('Download error: ' + e.message, 'error');
     }
   }
 
