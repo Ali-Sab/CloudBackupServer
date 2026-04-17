@@ -325,6 +325,28 @@ button.link-btn:hover { color: var(--color-primary); }
 .file-item.is-dir .file-name { color: var(--color-primary); font-weight: 500; }
 .file-item.file-empty { color: var(--color-muted); font-style: italic; justify-content: center; }
 
+.backup-status {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.backup-status.done       { color: var(--color-success); }
+.backup-status.outdated   { color: #f59e0b; }
+.backup-status.error      { color: var(--color-error); }
+.backup-status.local-only { color: var(--color-border); }
+.backup-status.uploading {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* ---- Toast notifications ---- */
 #toast-container {
   position: fixed;

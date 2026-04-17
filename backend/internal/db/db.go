@@ -365,6 +365,32 @@ func GetFileBackup(ctx context.Context, pool *pgxpool.Pool, userID int64, relati
 	return b, nil
 }
 
+// GetFileBackupsByUserID returns all backup records for a user, ordered by relative_path.
+func GetFileBackupsByUserID(ctx context.Context, pool *pgxpool.Pool, userID int64) ([]models.FileBackup, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT id, user_id, relative_path, size, checksum_sha256, object_key, backed_up_at, version
+		 FROM file_backups WHERE user_id = $1 ORDER BY relative_path ASC`,
+		userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying file backups: %w", err)
+	}
+	defer rows.Close()
+
+	var backups []models.FileBackup
+	for rows.Next() {
+		var b models.FileBackup
+		if err := rows.Scan(&b.ID, &b.UserID, &b.RelativePath, &b.Size, &b.ChecksumSHA256, &b.ObjectKey, &b.BackedUpAt, &b.Version); err != nil {
+			return nil, fmt.Errorf("scanning file backup: %w", err)
+		}
+		backups = append(backups, b)
+	}
+	if backups == nil {
+		backups = []models.FileBackup{}
+	}
+	return backups, rows.Err()
+}
+
 // DeleteFileBackupsByUserID deletes all backup records for a user.
 // Called after a watched path change — the old backed-up content is stale.
 func DeleteFileBackupsByUserID(ctx context.Context, pool *pgxpool.Pool, userID int64) error {

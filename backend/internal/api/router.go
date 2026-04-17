@@ -41,6 +41,7 @@ func NewRouter(pool *pgxpool.Pool, sessionSvc *session.Service, store storage.Ba
 			r.Put("/path", h.PutWatchedPath)
 			r.Get("/", h.GetFiles)
 			r.Put("/sync", h.PutSyncFiles)
+			r.Get("/backups", h.GetFileBackups)
 			r.Put("/backup/*", h.PutFileBackup)
 			r.Get("/backup/*", h.GetFileBackup)
 		})
