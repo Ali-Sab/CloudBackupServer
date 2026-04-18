@@ -61,7 +61,7 @@
     addFolder(path, name) {
       const body = { path };
       if (name !== undefined && name !== '') body.name = name;
-      return APIClient.post('/api/folders', body);
+      return APIClient.request('/api/folders', { method: 'POST', body: JSON.stringify(body) });
     },
 
     /** Deletes a folder and all its backups. */
