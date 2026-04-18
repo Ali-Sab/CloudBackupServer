@@ -108,8 +108,6 @@ if (typeof module !== 'undefined') {
     const el = document.getElementById('file-browser');
     el.classList.remove('hidden');
     renderScaffold(el);
-
-    document.getElementById('current-path').textContent = folderPath;
     setBackupButtonEnabled(true);
 
     try {
@@ -175,7 +173,6 @@ if (typeof module !== 'undefined') {
             <button id="all-folders-btn">← All Folders</button>
           </div>
         </div>
-        <p id="current-path" class="file-current-path"></p>
         <ul id="file-list" class="file-list">
           <li class="file-item file-empty">Loading…</li>
         </ul>

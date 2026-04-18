@@ -11,11 +11,23 @@ ALTER TABLE file_backups
 -- +goose StatementEnd
 
 -- +goose StatementBegin
-UPDATE file_backups
-SET watched_path_id = (
-    SELECT id FROM watched_paths WHERE user_id = file_backups.user_id LIMIT 1
-)
-WHERE watched_path_id IS NULL;
+UPDATE file_backups fb
+SET watched_path_id = wp.id
+FROM (
+    SELECT user_id, MIN(id) AS id
+    FROM watched_paths
+    GROUP BY user_id
+) wp
+WHERE fb.user_id = wp.user_id
+  AND fb.watched_path_id IS NULL;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM file_backups WHERE watched_path_id IS NULL) THEN
+    RAISE EXCEPTION 'Migration 00010: some file_backups rows have no matching watched_paths row — backfill manually before re-running';
+  END IF;
+END $$;
 
 ALTER TABLE file_backups ALTER COLUMN watched_path_id SET NOT NULL;
 -- +goose StatementEnd
