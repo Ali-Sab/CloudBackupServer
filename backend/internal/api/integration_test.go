@@ -186,6 +186,14 @@ func authPut(t *testing.T, client *http.Client, url, body string) *http.Response
 	return resp
 }
 
+func authDelete(t *testing.T, client *http.Client, url string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodDelete, url, nil)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
 // postRefresh calls /api/auth/refresh via the client (cookie jar sends the token automatically).
 func postRefresh(t *testing.T, client *http.Client, srvURL string) *http.Response {
 	t.Helper()
@@ -223,6 +231,35 @@ func registerAndLogin(t *testing.T, srv *httptest.Server, email, password string
 		fmt.Sprintf(`{"email":%q,"password":%q}`, email, password))
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "registration must succeed")
 	return client
+}
+
+// addFolder creates a new watched folder and returns its ID.
+func addFolder(t *testing.T, client *http.Client, srvURL, path string) int64 {
+	t.Helper()
+	resp := postJSONWithClient(t, client, srvURL+"/api/folders",
+		fmt.Sprintf(`{"path":%q}`, path))
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "addFolder must succeed")
+	var f api.FolderResponse
+	decodeJSON(t, resp, &f)
+	require.NotZero(t, f.ID)
+	return f.ID
+}
+
+// folderURL returns the base URL for a specific folder.
+func folderURL(srvURL string, folderID int64) string {
+	return fmt.Sprintf("%s/api/folders/%d", srvURL, folderID)
+}
+
+// authUpload sends a PUT /api/folders/{id}/backup/{path} with raw bytes and the required headers.
+func authUpload(t *testing.T, client *http.Client, url, checksum string, body []byte) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+	req.Header.Set("X-Checksum-SHA256", checksum)
+	req.Header.Set("X-File-Size", strconv.Itoa(len(body)))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	return resp
 }
 
 // ---- tests ----
@@ -442,9 +479,9 @@ func TestIntegration_ForgotPasswordUnknownUser(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
-// ---- File endpoint integration tests ----
+// ---- Folder endpoint integration tests ----
 
-func TestIntegration_FilesEndpoints_RequireAuth(t *testing.T) {
+func TestIntegration_FolderEndpoints_RequireAuth(t *testing.T) {
 	srv := setupTestServer(t)
 	defer srv.Close()
 
@@ -453,10 +490,12 @@ func TestIntegration_FilesEndpoints_RequireAuth(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{http.MethodGet, "/api/files/path", ""},
-		{http.MethodPut, "/api/files/path", `{"path":"/tmp"}`},
-		{http.MethodGet, "/api/files/", ""},
-		{http.MethodPut, "/api/files/sync", `{"files":[]}`},
+		{http.MethodGet, "/api/folders", ""},
+		{http.MethodPost, "/api/folders", `{"path":"/tmp"}`},
+		{http.MethodDelete, "/api/folders/1", ""},
+		{http.MethodGet, "/api/folders/1/files", ""},
+		{http.MethodPut, "/api/folders/1/sync", `{"files":[]}`},
+		{http.MethodGet, "/api/folders/1/backups", ""},
 	} {
 		var req *http.Request
 		if tc.body != "" {
@@ -471,71 +510,115 @@ func TestIntegration_FilesEndpoints_RequireAuth(t *testing.T) {
 	}
 }
 
-func TestIntegration_WatchedPath_SetAndGet(t *testing.T) {
+func TestIntegration_Folders_AddAndList(t *testing.T) {
 	srv := setupTestServer(t)
 	defer srv.Close()
 
-	client := registerAndLogin(t, srv, "path-user@example.com", "pass")
+	client := registerAndLogin(t, srv, "folder-user@example.com", "pass")
 
-	// GET before any path is set → 404
-	resp := authGet(t, client, srv.URL+"/api/files/path")
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-
-	// PUT a path
-	resp = authPut(t, client, srv.URL+"/api/files/path", `{"path":"/home/user/documents"}`)
+	// GET before any folder exists → empty list
+	resp := authGet(t, client, srv.URL+"/api/folders")
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	var wp api.WatchedPathResponse
-	decodeJSON(t, resp, &wp)
-	assert.Equal(t, "/home/user/documents", wp.Path)
-	assert.NotZero(t, wp.ID)
+	var empty api.FolderStatsResponse
+	decodeJSON(t, resp, &empty)
+	assert.Empty(t, empty.Folders)
 
-	// GET now returns the saved path
-	resp = authGet(t, client, srv.URL+"/api/files/path")
+	// POST a folder
+	resp = postJSONWithClient(t, client, srv.URL+"/api/folders", `{"path":"/home/user/documents","name":"Docs"}`)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+	var f api.FolderResponse
+	decodeJSON(t, resp, &f)
+	assert.Equal(t, "/home/user/documents", f.Path)
+	assert.Equal(t, "Docs", f.Name)
+	assert.NotZero(t, f.ID)
+
+	// GET now returns one folder
+	resp = authGet(t, client, srv.URL+"/api/folders")
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	var got api.WatchedPathResponse
-	decodeJSON(t, resp, &got)
-	assert.Equal(t, "/home/user/documents", got.Path)
+	var stats api.FolderStatsResponse
+	decodeJSON(t, resp, &stats)
+	require.Len(t, stats.Folders, 1)
+	assert.Equal(t, "/home/user/documents", stats.Folders[0].Path)
+	assert.Equal(t, "Docs", stats.Folders[0].Name)
+	assert.Equal(t, 0, stats.Folders[0].FileCount)
 }
 
-func TestIntegration_WatchedPath_Upsert(t *testing.T) {
+func TestIntegration_Folders_MultiplePerUser(t *testing.T) {
 	srv := setupTestServer(t)
 	defer srv.Close()
 
-	client := registerAndLogin(t, srv, "upsert-user@example.com", "pass")
+	client := registerAndLogin(t, srv, "multi-folder@example.com", "pass")
 
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/old/path"}`)
-	resp := authPut(t, client, srv.URL+"/api/files/path", `{"path":"/new/path"}`)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	addFolder(t, client, srv.URL, "/home/user/photos")
+	addFolder(t, client, srv.URL, "/home/user/documents")
 
-	var wp api.WatchedPathResponse
-	decodeJSON(t, resp, &wp)
-	assert.Equal(t, "/new/path", wp.Path)
-
-	// GET must return the updated path, not both
-	resp = authGet(t, client, srv.URL+"/api/files/path")
-	var got api.WatchedPathResponse
-	decodeJSON(t, resp, &got)
-	assert.Equal(t, "/new/path", got.Path)
+	resp := authGet(t, client, srv.URL+"/api/folders")
+	var stats api.FolderStatsResponse
+	decodeJSON(t, resp, &stats)
+	assert.Len(t, stats.Folders, 2)
 }
 
-func TestIntegration_WatchedPath_MissingPath(t *testing.T) {
+func TestIntegration_Folder_MissingPath(t *testing.T) {
 	srv := setupTestServer(t)
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "nopath-user@example.com", "pass")
 
-	resp := authPut(t, client, srv.URL+"/api/files/path", `{"path":""}`)
+	resp := postJSONWithClient(t, client, srv.URL+"/api/folders", `{"path":""}`)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
-func TestIntegration_SyncFiles_NoPath(t *testing.T) {
+func TestIntegration_Folder_DeleteAndVerify(t *testing.T) {
+	srv, store := setupTestServerWithStore(t)
+	defer srv.Close()
+
+	client := registerAndLogin(t, srv, "deleter@example.com", "pass")
+	folderID := addFolder(t, client, srv.URL, "/home/user/docs")
+
+	// Upload a file into the folder
+	authUpload(t, client, folderURL(srv.URL, folderID)+"/backup/readme.txt", "ck1", []byte("data"))
+
+	// Verify object is in store
+	store.mu.Lock()
+	countBefore := len(store.objects)
+	store.mu.Unlock()
+	require.Equal(t, 1, countBefore)
+
+	// Delete the folder
+	resp := authDelete(t, client, folderURL(srv.URL, folderID))
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// Object storage must be empty
+	store.mu.Lock()
+	countAfter := len(store.objects)
+	store.mu.Unlock()
+	assert.Equal(t, 0, countAfter, "deleting folder must remove all backed-up objects")
+
+	// Folder must not appear in list
+	resp = authGet(t, client, srv.URL+"/api/folders")
+	var stats api.FolderStatsResponse
+	decodeJSON(t, resp, &stats)
+	assert.Empty(t, stats.Folders)
+}
+
+func TestIntegration_Folder_DeleteNotFound(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	client := registerAndLogin(t, srv, "delnf@example.com", "pass")
+
+	resp := authDelete(t, client, srv.URL+"/api/folders/99999")
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestIntegration_SyncFiles_NoFolder(t *testing.T) {
 	srv := setupTestServer(t)
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "syncnopath@example.com", "pass")
 
-	// Sync without setting a path first → 404
-	resp := authPut(t, client, srv.URL+"/api/files/sync", `{"files":[]}`)
+	// Sync without a valid folder ID → 404
+	resp := authPut(t, client, srv.URL+"/api/folders/99999/sync", `{"files":[]}`)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
@@ -544,32 +627,30 @@ func TestIntegration_SyncAndGetFiles(t *testing.T) {
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "sync-user@example.com", "pass")
-
-	// Set a watched path first
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/home/user/backups"}`)
+	folderID := addFolder(t, client, srv.URL, "/home/user/backups")
+	base := folderURL(srv.URL, folderID)
 
 	// GET files before any sync → empty list
-	resp := authGet(t, client, srv.URL+"/api/files/")
+	resp := authGet(t, client, base+"/files")
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	var empty api.WatchedFilesResponse
 	decodeJSON(t, resp, &empty)
 	assert.Empty(t, empty.Files)
 
-	// Sync a set of files (include relative_path)
+	// Sync a set of files
 	syncBody := `{"files":[
 		{"name":"notes.txt","relative_path":"notes.txt","is_directory":false,"size":1024,"modified_ms":1700000000000},
 		{"name":"photos","relative_path":"photos","is_directory":true,"size":0,"modified_ms":1700000001000}
 	]}`
-	resp = authPut(t, client, srv.URL+"/api/files/sync", syncBody)
+	resp = authPut(t, client, base+"/sync", syncBody)
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 
 	// GET files → ordered by relative_path ASC
-	resp = authGet(t, client, srv.URL+"/api/files/")
+	resp = authGet(t, client, base+"/files")
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	var files api.WatchedFilesResponse
 	decodeJSON(t, resp, &files)
 	require.Len(t, files.Files, 2)
-	// relative_path ASC: "notes.txt" < "photos"
 	assert.Equal(t, "notes.txt", files.Files[0].Name)
 	assert.Equal(t, "notes.txt", files.Files[0].RelativePath)
 	assert.Equal(t, int64(1024), files.Files[0].Size)
@@ -577,12 +658,12 @@ func TestIntegration_SyncAndGetFiles(t *testing.T) {
 	assert.True(t, files.Files[1].IsDirectory)
 
 	// Re-sync with different files — must replace, not append
-	resp = authPut(t, client, srv.URL+"/api/files/sync", `{"files":[
+	resp = authPut(t, client, base+"/sync", `{"files":[
 		{"name":"archive.zip","relative_path":"archive.zip","is_directory":false,"size":4096,"modified_ms":1700000002000}
 	]}`)
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 
-	resp = authGet(t, client, srv.URL+"/api/files/")
+	resp = authGet(t, client, base+"/files")
 	var replaced api.WatchedFilesResponse
 	decodeJSON(t, resp, &replaced)
 	require.Len(t, replaced.Files, 1)
@@ -594,25 +675,24 @@ func TestIntegration_SyncFiles_WithRelativePath(t *testing.T) {
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "relpath@example.com", "pass")
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/home/user/docs"}`)
+	folderID := addFolder(t, client, srv.URL, "/home/user/docs")
+	base := folderURL(srv.URL, folderID)
 
-	// Sync a tree: root file, a subdirectory, and a file inside that subdirectory
 	syncBody := `{"files":[
 		{"name":"readme.txt","relative_path":"readme.txt","is_directory":false,"size":512,"modified_ms":1000},
 		{"name":"src","relative_path":"src","is_directory":true,"size":0,"modified_ms":2000},
 		{"name":"main.go","relative_path":"src/main.go","is_directory":false,"size":2048,"modified_ms":3000}
 	]}`
-	resp := authPut(t, client, srv.URL+"/api/files/sync", syncBody)
+	resp := authPut(t, client, base+"/sync", syncBody)
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 
-	resp = authGet(t, client, srv.URL+"/api/files/")
+	resp = authGet(t, client, base+"/files")
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	var result api.WatchedFilesResponse
 	decodeJSON(t, resp, &result)
 	require.Len(t, result.Files, 3)
 
-	// Index by relative_path for easy assertion
-	byPath := make(map[string]string) // relative_path → name
+	byPath := make(map[string]string)
 	bySize := make(map[string]int64)
 	byIsDir := make(map[string]bool)
 	for _, f := range result.Files {
@@ -632,71 +712,26 @@ func TestIntegration_SyncFiles_RelativePathOrdering(t *testing.T) {
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "ordering@example.com", "pass")
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/home/user/project"}`)
+	folderID := addFolder(t, client, srv.URL, "/home/user/project")
+	base := folderURL(srv.URL, folderID)
 
-	// Sync entries that should come back in relative_path ASC order
 	syncBody := `{"files":[
 		{"name":"z.txt","relative_path":"z.txt","is_directory":false,"size":1,"modified_ms":0},
 		{"name":"a","relative_path":"a","is_directory":true,"size":0,"modified_ms":0},
 		{"name":"b.txt","relative_path":"a/b.txt","is_directory":false,"size":1,"modified_ms":0},
 		{"name":"c.txt","relative_path":"c.txt","is_directory":false,"size":1,"modified_ms":0}
 	]}`
-	authPut(t, client, srv.URL+"/api/files/sync", syncBody)
+	authPut(t, client, base+"/sync", syncBody)
 
-	resp := authGet(t, client, srv.URL+"/api/files/")
+	resp := authGet(t, client, base+"/files")
 	var result api.WatchedFilesResponse
 	decodeJSON(t, resp, &result)
 	require.Len(t, result.Files, 4)
 
-	// Expected order: "a" < "a/b.txt" < "c.txt" < "z.txt" (lexicographic relative_path ASC)
 	assert.Equal(t, "a", result.Files[0].RelativePath)
 	assert.Equal(t, "a/b.txt", result.Files[1].RelativePath)
 	assert.Equal(t, "c.txt", result.Files[2].RelativePath)
 	assert.Equal(t, "z.txt", result.Files[3].RelativePath)
-}
-
-func TestIntegration_ChangingPathClearsFiles(t *testing.T) {
-	srv := setupTestServer(t)
-	defer srv.Close()
-
-	client := registerAndLogin(t, srv, "pathchange@example.com", "pass")
-
-	// Set path and sync some files
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/old/path"}`)
-	authPut(t, client, srv.URL+"/api/files/sync", `{"files":[
-		{"name":"old-file.txt","relative_path":"old-file.txt","is_directory":false,"size":100,"modified_ms":0}
-	]}`)
-
-	// Verify files exist
-	resp := authGet(t, client, srv.URL+"/api/files/")
-	var before api.WatchedFilesResponse
-	decodeJSON(t, resp, &before)
-	require.Len(t, before.Files, 1)
-
-	// Change the path
-	resp = authPut(t, client, srv.URL+"/api/files/path", `{"path":"/new/path"}`)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	var wp api.WatchedPathResponse
-	decodeJSON(t, resp, &wp)
-	assert.Equal(t, "/new/path", wp.Path)
-
-	// File list must now be empty — stale files cleared automatically
-	resp = authGet(t, client, srv.URL+"/api/files/")
-	var after api.WatchedFilesResponse
-	decodeJSON(t, resp, &after)
-	assert.Empty(t, after.Files, "changing the watched path must clear the stale file list")
-}
-
-// authUpload sends a PUT /api/files/backup/{path} with raw bytes and the required headers.
-func authUpload(t *testing.T, client *http.Client, url, checksum string, body []byte) *http.Response {
-	t.Helper()
-	req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
-	req.Header.Set("X-Checksum-SHA256", checksum)
-	req.Header.Set("X-File-Size", strconv.Itoa(len(body)))
-	req.Header.Set("Content-Type", "application/octet-stream")
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	return resp
 }
 
 func TestIntegration_FilesIsolatedPerUser(t *testing.T) {
@@ -706,16 +741,18 @@ func TestIntegration_FilesIsolatedPerUser(t *testing.T) {
 	clientA := registerAndLogin(t, srv, "user-a@example.com", "pass")
 	clientB := registerAndLogin(t, srv, "user-b@example.com", "pass")
 
-	// User A sets a path and syncs a file
-	authPut(t, clientA, srv.URL+"/api/files/path", `{"path":"/a/path"}`)
-	authPut(t, clientA, srv.URL+"/api/files/sync", `{"files":[{"name":"a.txt","relative_path":"a.txt","is_directory":false,"size":1,"modified_ms":0}]}`)
+	folderID := addFolder(t, clientA, srv.URL, "/a/path")
+	authPut(t, clientA, folderURL(srv.URL, folderID)+"/sync",
+		`{"files":[{"name":"a.txt","relative_path":"a.txt","is_directory":false,"size":1,"modified_ms":0}]}`)
 
-	// User B has no path set
-	resp := authGet(t, clientB, srv.URL+"/api/files/path")
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	// User B has no folders
+	resp := authGet(t, clientB, srv.URL+"/api/folders")
+	var stats api.FolderStatsResponse
+	decodeJSON(t, resp, &stats)
+	assert.Empty(t, stats.Folders)
 
-	// User B cannot see user A's files
-	resp = authGet(t, clientB, srv.URL+"/api/files/")
+	// User B cannot access user A's folder
+	resp = authGet(t, clientB, folderURL(srv.URL, folderID)+"/files")
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
@@ -726,12 +763,13 @@ func TestIntegration_UploadFile_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "uploader@example.com", "pass")
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/watched"}`)
+	folderID := addFolder(t, client, srv.URL, "/watched")
+	base := folderURL(srv.URL, folderID)
 
 	content := []byte("hello backup world")
 	checksum := "abc123deadbeef"
 
-	resp := authUpload(t, client, srv.URL+"/api/files/backup/notes.txt", checksum, content)
+	resp := authUpload(t, client, base+"/backup/notes.txt", checksum, content)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result api.UploadFileResponse
@@ -757,17 +795,18 @@ func TestIntegration_UploadFile_SkipsIfChecksumMatches(t *testing.T) {
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "skipper@example.com", "pass")
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/watched"}`)
+	folderID := addFolder(t, client, srv.URL, "/watched")
+	base := folderURL(srv.URL, folderID)
 
 	content := []byte("same content")
 	checksum := "samechecksum123"
 
 	// First upload
-	resp := authUpload(t, client, srv.URL+"/api/files/backup/doc.txt", checksum, content)
+	resp := authUpload(t, client, base+"/backup/doc.txt", checksum, content)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Second upload — same checksum
-	resp = authUpload(t, client, srv.URL+"/api/files/backup/doc.txt", checksum, content)
+	resp = authUpload(t, client, base+"/backup/doc.txt", checksum, content)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result api.UploadFileResponse
@@ -787,16 +826,17 @@ func TestIntegration_UploadFile_OverwritesOnChecksumChange(t *testing.T) {
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "overwriter@example.com", "pass")
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/watched"}`)
+	folderID := addFolder(t, client, srv.URL, "/watched")
+	base := folderURL(srv.URL, folderID)
 
 	// First upload
-	resp := authUpload(t, client, srv.URL+"/api/files/backup/data.bin", "checksum-v1", []byte("version 1"))
+	resp := authUpload(t, client, base+"/backup/data.bin", "checksum-v1", []byte("version 1"))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var r1 api.UploadFileResponse
 	decodeJSON(t, resp, &r1)
 
 	// Second upload — different checksum (file changed)
-	resp = authUpload(t, client, srv.URL+"/api/files/backup/data.bin", "checksum-v2", []byte("version 2"))
+	resp = authUpload(t, client, base+"/backup/data.bin", "checksum-v2", []byte("version 2"))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var r2 api.UploadFileResponse
 	decodeJSON(t, resp, &r2)
@@ -813,12 +853,13 @@ func TestIntegration_DownloadFile_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "downloader@example.com", "pass")
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/watched"}`)
+	folderID := addFolder(t, client, srv.URL, "/watched")
+	base := folderURL(srv.URL, folderID)
 
 	content := []byte("download me please")
-	authUpload(t, client, srv.URL+"/api/files/backup/report.pdf", "dlchecksum", content)
+	authUpload(t, client, base+"/backup/report.pdf", "dlchecksum", content)
 
-	resp := authGet(t, client, srv.URL+"/api/files/backup/report.pdf")
+	resp := authGet(t, client, base+"/backup/report.pdf")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "application/octet-stream", resp.Header.Get("Content-Type"))
 
@@ -832,38 +873,10 @@ func TestIntegration_DownloadFile_NotFound(t *testing.T) {
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "nope@example.com", "pass")
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/watched"}`)
+	folderID := addFolder(t, client, srv.URL, "/watched")
+	base := folderURL(srv.URL, folderID)
 
-	resp := authGet(t, client, srv.URL+"/api/files/backup/doesnotexist.txt")
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-}
-
-func TestIntegration_ChangingPath_CleansUpBackups(t *testing.T) {
-	srv, store := setupTestServerWithStore(t)
-	defer srv.Close()
-
-	client := registerAndLogin(t, srv, "pathchanger@example.com", "pass")
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/old"}`)
-	authUpload(t, client, srv.URL+"/api/files/backup/file.txt", "cksum1", []byte("old content"))
-
-	// Verify it's in the store before path change
-	store.mu.Lock()
-	countBefore := len(store.objects)
-	store.mu.Unlock()
-	require.Equal(t, 1, countBefore)
-
-	// Change the watched path
-	resp := authPut(t, client, srv.URL+"/api/files/path", `{"path":"/new"}`)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// Object storage must now be empty for this user
-	store.mu.Lock()
-	countAfter := len(store.objects)
-	store.mu.Unlock()
-	assert.Equal(t, 0, countAfter, "changing path must wipe backed-up objects")
-
-	// Download must return 404 — DB record also cleared
-	resp = authGet(t, client, srv.URL+"/api/files/backup/file.txt")
+	resp := authGet(t, client, base+"/backup/doesnotexist.txt")
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
@@ -874,15 +887,49 @@ func TestIntegration_BackupsIsolatedPerUser(t *testing.T) {
 	clientA := registerAndLogin(t, srv, "backup-a@example.com", "pass")
 	clientB := registerAndLogin(t, srv, "backup-b@example.com", "pass")
 
-	authPut(t, clientA, srv.URL+"/api/files/path", `{"path":"/a"}`)
-	authPut(t, clientB, srv.URL+"/api/files/path", `{"path":"/b"}`)
+	folderA := addFolder(t, clientA, srv.URL, "/a")
+	folderB := addFolder(t, clientB, srv.URL, "/b")
 
 	// User A uploads a file
-	authUpload(t, clientA, srv.URL+"/api/files/backup/secret.txt", "ckA", []byte("user A data"))
+	authUpload(t, clientA, folderURL(srv.URL, folderA)+"/backup/secret.txt", "ckA", []byte("user A data"))
 
-	// User B cannot download user A's file
-	resp := authGet(t, clientB, srv.URL+"/api/files/backup/secret.txt")
+	// User B cannot download user A's file — wrong folder ownership
+	resp := authGet(t, clientB, folderURL(srv.URL, folderA)+"/backup/secret.txt")
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	// User B also has nothing in their own folder
+	resp = authGet(t, clientB, folderURL(srv.URL, folderB)+"/backup/secret.txt")
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestIntegration_TwoFolders_SameRelativePath(t *testing.T) {
+	srv, store := setupTestServerWithStore(t)
+	defer srv.Close()
+
+	client := registerAndLogin(t, srv, "twofold@example.com", "pass")
+	folderA := addFolder(t, client, srv.URL, "/home/user/photos")
+	folderB := addFolder(t, client, srv.URL, "/home/user/documents")
+
+	// Same relative path in both folders
+	authUpload(t, client, folderURL(srv.URL, folderA)+"/backup/README.md", "ckA", []byte("photos readme"))
+	authUpload(t, client, folderURL(srv.URL, folderB)+"/backup/README.md", "ckB", []byte("docs readme"))
+
+	// Both objects must be in store independently
+	store.mu.Lock()
+	count := len(store.objects)
+	store.mu.Unlock()
+	assert.Equal(t, 2, count, "same relative path in two folders must produce two distinct objects")
+
+	// Downloads are independent
+	respA := authGet(t, client, folderURL(srv.URL, folderA)+"/backup/README.md")
+	require.Equal(t, http.StatusOK, respA.StatusCode)
+	bodyA, _ := io.ReadAll(respA.Body)
+	assert.Equal(t, []byte("photos readme"), bodyA)
+
+	respB := authGet(t, client, folderURL(srv.URL, folderB)+"/backup/README.md")
+	require.Equal(t, http.StatusOK, respB.StatusCode)
+	bodyB, _ := io.ReadAll(respB.Body)
+	assert.Equal(t, []byte("docs readme"), bodyB)
 }
 
 func TestIntegration_UploadFile_ZeroBytes(t *testing.T) {
@@ -890,9 +937,10 @@ func TestIntegration_UploadFile_ZeroBytes(t *testing.T) {
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "zerobytes@example.com", "pass")
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/watched"}`)
+	folderID := addFolder(t, client, srv.URL, "/watched")
+	base := folderURL(srv.URL, folderID)
 
-	resp := authUpload(t, client, srv.URL+"/api/files/backup/empty.txt", "e3b0c44298fc1c149afb", []byte{})
+	resp := authUpload(t, client, base+"/backup/empty.txt", "e3b0c44298fc1c149afb", []byte{})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result api.UploadFileResponse
@@ -907,9 +955,10 @@ func TestIntegration_UploadFile_EmptyPath(t *testing.T) {
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "emptypath@example.com", "pass")
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/watched"}`)
+	folderID := addFolder(t, client, srv.URL, "/watched")
+	base := folderURL(srv.URL, folderID)
 
-	resp := authUpload(t, client, srv.URL+"/api/files/backup/", "abc123", []byte("data"))
+	resp := authUpload(t, client, base+"/backup/", "abc123", []byte("data"))
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
@@ -918,10 +967,11 @@ func TestIntegration_DownloadFile_PathTraversal(t *testing.T) {
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "dltraversal@example.com", "pass")
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/watched"}`)
+	folderID := addFolder(t, client, srv.URL, "/watched")
+	base := folderURL(srv.URL, folderID)
 
 	for _, path := range []string{"../etc/passwd", "foo/../bar"} {
-		resp := authGet(t, client, srv.URL+"/api/files/backup/"+path)
+		resp := authGet(t, client, base+"/backup/"+path)
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "path %q should be rejected", path)
 	}
 }
@@ -931,10 +981,11 @@ func TestIntegration_DownloadFile_OrphanedRecord(t *testing.T) {
 	defer srv.Close()
 
 	client := registerAndLogin(t, srv, "orphan@example.com", "pass")
-	authPut(t, client, srv.URL+"/api/files/path", `{"path":"/watched"}`)
+	folderID := addFolder(t, client, srv.URL, "/watched")
+	base := folderURL(srv.URL, folderID)
 
 	// Upload a file to create both the DB record and the object.
-	authUpload(t, client, srv.URL+"/api/files/backup/orphan.txt", "orphanck", []byte("data"))
+	authUpload(t, client, base+"/backup/orphan.txt", "orphanck", []byte("data"))
 
 	// Manually wipe the object store to simulate an orphaned DB record.
 	store.mu.Lock()
@@ -944,7 +995,7 @@ func TestIntegration_DownloadFile_OrphanedRecord(t *testing.T) {
 	store.mu.Unlock()
 
 	// DB record exists but the object is gone — expect 500.
-	resp := authGet(t, client, srv.URL+"/api/files/backup/orphan.txt")
+	resp := authGet(t, client, base+"/backup/orphan.txt")
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 }
 

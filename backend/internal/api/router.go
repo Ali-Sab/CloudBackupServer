@@ -35,15 +35,18 @@ func NewRouter(pool *pgxpool.Pool, sessionSvc *session.Service, store storage.Ba
 			r.Post("/reset-password", h.PostResetPassword)
 		})
 
-		r.Route("/files", func(r chi.Router) {
+		r.Route("/folders", func(r chi.Router) {
 			r.Use(h.requireAuth)
-			r.Get("/path", h.GetWatchedPath)
-			r.Put("/path", h.PutWatchedPath)
-			r.Get("/", h.GetFiles)
-			r.Put("/sync", h.PutSyncFiles)
-			r.Get("/backups", h.GetFileBackups)
-			r.Put("/backup/*", h.PutFileBackup)
-			r.Get("/backup/*", h.GetFileBackup)
+			r.Get("/", h.GetFolders)
+			r.Post("/", h.PostFolder)
+			r.Route("/{folderID}", func(r chi.Router) {
+				r.Delete("/", h.DeleteFolder)
+				r.Get("/files", h.GetFiles)
+				r.Put("/sync", h.PutSyncFiles)
+				r.Get("/backups", h.GetFileBackups)
+				r.Put("/backup/*", h.PutFileBackup)
+				r.Get("/backup/*", h.GetFileBackup)
+			})
 		})
 	})
 

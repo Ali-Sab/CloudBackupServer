@@ -87,8 +87,9 @@
           <button id="logout-btn">Sign Out</button>
         `;
         document.getElementById('logout-btn').addEventListener('click', logout);
-        window.Files.show();
+        window.Dashboard.show();
       } else {
+        window.Dashboard.hide();
         window.Files.hide();
         renderLoginForm(el);
       }
