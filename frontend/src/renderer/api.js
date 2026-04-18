@@ -59,7 +59,9 @@
 
     /** Creates a new watched folder. Body: { path, name? }. Returns FolderResponse. */
     addFolder(path, name) {
-      return APIClient.post('/api/folders', { path, name: name || '' });
+      const body = { path };
+      if (name !== undefined && name !== '') body.name = name;
+      return APIClient.post('/api/folders', body);
     },
 
     /** Deletes a folder and all its backups. */

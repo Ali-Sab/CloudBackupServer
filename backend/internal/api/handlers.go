@@ -172,7 +172,7 @@ type UploadFileResponse struct {
 
 // GetHealth handles GET /api/health.
 func (h *Handler) GetHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok", Version: "0.1.0"})
+	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok", Version: "0.3.0"})
 }
 
 // GetSession handles GET /api/session.
@@ -522,7 +522,13 @@ func (h *Handler) PostFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wp, err := db.AddWatchedPath(r.Context(), h.db, userID, req.Path, req.Name)
+	// Default name to last path segment when the client omits it.
+	name := req.Name
+	if name == "" {
+		name = filepath.Base(req.Path)
+	}
+
+	wp, err := db.AddWatchedPath(r.Context(), h.db, userID, req.Path, name)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to add folder"})
 		return
@@ -566,7 +572,11 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := db.DeleteWatchedPath(r.Context(), h.db, folderID, userID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to delete folder"})
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "folder not found"})
+		} else {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to delete folder"})
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -705,9 +715,23 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	objectKey := storage.ObjectKey(userID, wp.ID, relativePath)
+
+	// If a prior backup exists with a different key (e.g. legacy 2-part format), delete
+	// the old object after the new one is written so storage doesn't accumulate orphans.
+	var oldKey string
+	if err == nil && existing.ObjectKey != objectKey {
+		oldKey = existing.ObjectKey
+	}
+
 	if err := h.storage.PutObject(r.Context(), objectKey, r.Body, fileSize, "application/octet-stream"); err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "upload failed"})
 		return
+	}
+
+	if oldKey != "" {
+		if delErr := h.storage.DeleteObject(r.Context(), oldKey); delErr != nil {
+			log.Printf("warn: failed to delete old object %q after re-upload: %v", oldKey, delErr)
+		}
 	}
 
 	backup := &models.FileBackup{

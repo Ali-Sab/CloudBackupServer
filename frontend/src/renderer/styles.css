@@ -435,6 +435,11 @@ button.link-btn:hover { color: var(--color-primary); }
 
 /* ---- Dashboard ---- */
 .dashboard { width: 100%; max-width: 860px; }
+
+.dashboard .card {
+  max-width: 100%;
+  padding: 28px 32px;
+}
 .dashboard-header {
   display: flex;
   align-items: center;
