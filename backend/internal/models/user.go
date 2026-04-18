@@ -31,23 +31,35 @@ type PasswordResetToken struct {
 	CreatedAt time.Time
 }
 
-// WatchedPath represents a user's chosen local backup directory.
-// Each user has at most one watched path (enforced by DB unique constraint).
+// WatchedPath represents one of a user's local backup directories.
+// A user may have many watched paths (no unique constraint on user_id).
 type WatchedPath struct {
 	ID        int64     `json:"id"`
 	UserID    int64     `json:"user_id"`
 	Path      string    `json:"path"`
+	Name      string    `json:"name"` // user-visible label; defaults to last path segment
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// FolderStats is the dashboard aggregate row for a single watched path.
+// Totals are computed from file_backups at query time.
+type FolderStats struct {
+	ID             int64      `json:"id"`
+	Path           string     `json:"path"`
+	Name           string     `json:"name"`
+	FileCount      int        `json:"file_count"`
+	TotalSizeBytes int64      `json:"total_size_bytes"`
+	LastBackedUpAt *time.Time `json:"last_backed_up_at"` // nil when nothing has been backed up yet
+}
+
 // FileBackup represents a successfully uploaded backup of a single file.
-// Records are keyed by (user_id, relative_path) and survive metadata syncs —
-// they are only removed when the user changes their watched path.
+// Records are keyed by (watched_path_id, relative_path).
 // Version increments each time the file content changes and is re-backed-up.
 type FileBackup struct {
 	ID             int64     `json:"id"`
 	UserID         int64     `json:"user_id"`
+	WatchedPathID  int64     `json:"watched_path_id"`
 	RelativePath   string    `json:"relative_path"`
 	Size           int64     `json:"size"`
 	ChecksumSHA256 string    `json:"checksum_sha256"`

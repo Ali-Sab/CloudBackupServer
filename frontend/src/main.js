@@ -150,11 +150,12 @@ ipcMain.handle('upload-file', async (_event, { rootPath, relativePath, apiBaseUr
     return { error: `Checksum failed: ${e.message}` };
   }
 
-  // Build the request URL — each path segment is percent-encoded, slashes preserved.
+  // Build the request URL — apiBaseUrl is the full prefix up to (not including)
+  // the relative path (e.g. "http://localhost:8080/api/folders/3/backup").
   const encodedPath = relativePath.split('/').map(encodeURIComponent).join('/');
   let parsedUrl;
   try {
-    parsedUrl = new URL(`${apiBaseUrl}/api/files/backup/${encodedPath}`);
+    parsedUrl = new URL(`${apiBaseUrl}/${encodedPath}`);
   } catch (e) {
     return { error: `Invalid URL: ${e.message}` };
   }

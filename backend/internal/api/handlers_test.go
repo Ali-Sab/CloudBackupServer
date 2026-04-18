@@ -169,12 +169,14 @@ func TestFileEndpoints_RequireAuth(t *testing.T) {
 		method string
 		path   string
 	}{
-		{http.MethodGet, "/api/files/path"},
-		{http.MethodPut, "/api/files/path"},
-		{http.MethodGet, "/api/files/"},
-		{http.MethodPut, "/api/files/sync"},
-		{http.MethodPut, "/api/files/backup/some/file.txt"},
-		{http.MethodGet, "/api/files/backup/some/file.txt"},
+		{http.MethodGet, "/api/folders/"},
+		{http.MethodPost, "/api/folders/"},
+		{http.MethodDelete, "/api/folders/1/"},
+		{http.MethodGet, "/api/folders/1/files"},
+		{http.MethodPut, "/api/folders/1/sync"},
+		{http.MethodGet, "/api/folders/1/backups"},
+		{http.MethodPut, "/api/folders/1/backup/some/file.txt"},
+		{http.MethodGet, "/api/folders/1/backup/some/file.txt"},
 	}
 
 	for _, ep := range endpoints {
@@ -192,7 +194,7 @@ func TestFileEndpoints_RequireAuth(t *testing.T) {
 func TestFileEndpoints_InvalidToken(t *testing.T) {
 	r := newTestRouter()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/files/path", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/folders/", nil)
 	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: "not-a-valid-jwt"})
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
@@ -208,7 +210,7 @@ func TestUploadEndpoint_MissingChecksumHeader(t *testing.T) {
 	token, err := svc.CreateAccessToken(1, "user@example.com")
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPut, "/api/files/backup/test.txt", nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/test.txt", nil)
 	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
 	req.Header.Set("X-File-Size", "100")
 	// X-Checksum-SHA256 intentionally omitted
@@ -226,7 +228,7 @@ func TestUploadEndpoint_MissingFileSizeHeader(t *testing.T) {
 	token, err := svc.CreateAccessToken(1, "user@example.com")
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPut, "/api/files/backup/test.txt", nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/test.txt", nil)
 	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
 	req.Header.Set("X-Checksum-SHA256", "abc123")
 	// X-File-Size intentionally omitted
@@ -245,7 +247,7 @@ func TestUploadEndpoint_PathTraversal(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, path := range []string{"../etc/passwd", "foo/../bar/baz", "a/../../secret"} {
-		req := httptest.NewRequest(http.MethodPut, "/api/files/backup/"+path, nil)
+		req := httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/"+path, nil)
 		req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
 		req.Header.Set("X-Checksum-SHA256", "abc123")
 		req.Header.Set("X-File-Size", "10")
@@ -261,7 +263,7 @@ func TestUploadEndpoint_EmptyPath(t *testing.T) {
 	token, err := svc.CreateAccessToken(1, "user@example.com")
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPut, "/api/files/backup/", nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/", nil)
 	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
 	req.Header.Set("X-Checksum-SHA256", "abc123")
 	req.Header.Set("X-File-Size", "10")
@@ -277,7 +279,7 @@ func TestDownloadEndpoint_PathTraversal(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, path := range []string{"../etc/passwd", "foo/../bar", "a/../../secret"} {
-		req := httptest.NewRequest(http.MethodGet, "/api/files/backup/"+path, nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/folders/1/backup/"+path, nil)
 		req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)

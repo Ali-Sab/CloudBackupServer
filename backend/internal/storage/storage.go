@@ -41,10 +41,10 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Client, e
 	return &Client{mc: mc, bucket: bucket}, nil
 }
 
-// ObjectKey returns the canonical object key for a user's file.
-// Format: "{userID}/{relativePath}" — e.g. "1/photos/2024/img.jpg".
-func ObjectKey(userID int64, relativePath string) string {
-	return fmt.Sprintf("%d/%s", userID, relativePath)
+// ObjectKey returns the canonical object key for a backed-up file.
+// Format: "{userID}/{watchedPathID}/{relativePath}" — e.g. "1/3/photos/2024/img.jpg".
+func ObjectKey(userID, watchedPathID int64, relativePath string) string {
+	return fmt.Sprintf("%d/%d/%s", userID, watchedPathID, relativePath)
 }
 
 // PutObject streams r into object storage under key.

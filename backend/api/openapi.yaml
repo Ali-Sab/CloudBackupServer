@@ -31,7 +31,7 @@ info:
     and returns a 404 when the email is not found (anti-enumeration is disabled).
     Both behaviours will be reversed before production: the token will be delivered by email
     and the response will look identical regardless of whether the email exists.
-  version: 0.2.8
+  version: 0.3.0
   license:
     name: GNU General Public License v3.0
     url: https://www.gnu.org/licenses/gpl-3.0.html
@@ -41,8 +41,6 @@ servers:
     description: Local development server
 
 # Global default: every protected endpoint requires CookieAuth (or BearerAuth as fallback).
-# Insomnia applies the first listed scheme automatically on import and uses the cookie jar
-# to capture the access_token set by login/register/refresh.
 security:
   - CookieAuth: []
   - BearerAuth: []
@@ -52,10 +50,12 @@ tags:
     description: Server health and readiness
   - name: Auth
     description: Authentication, session management, and password reset
+  - name: Folders
+    description: Watched folder management — list, add, remove (requires auth)
   - name: Files
-    description: Watched directory path and file list management (requires auth)
+    description: Per-folder file list management (requires auth)
   - name: Backup
-    description: File content upload and download (requires auth)
+    description: Per-folder file content upload and download (requires auth)
 
 paths:
   /api/health:
@@ -72,7 +72,7 @@ paths:
                 $ref: "#/components/schemas/HealthResponse"
               example:
                 status: ok
-                version: 0.2.0
+                version: 0.3.0
 
   /api/session:
     get:
@@ -213,13 +213,6 @@ paths:
       description: |
         Revokes the caller's refresh token. Idempotent — succeeds even if the token is
         already revoked or not found.
-
-        The access token is intentionally not required — this allows logout even when
-        the access token has already expired.
-
-        The refresh token can be provided via the `refresh_token` cookie **or** in the JSON
-        request body. Both are optional — if neither is present the endpoint still returns 204
-        (nothing to revoke).
       operationId: logout
       tags: [Auth]
       security: []
@@ -242,11 +235,7 @@ paths:
         Generates a single-use password reset token (1 hour TTL).
 
         **Development only**: anti-enumeration is disabled — a 404 is returned when the
-        email is not found so misconfigured test accounts are easy to spot. Re-enable
-        the generic response before shipping to production.
-
-        `reset_token` is returned directly in the response body for development convenience.
-        In production this field will be removed and the token delivered by email.
+        email is not found. `reset_token` is returned directly in the response body.
       operationId: forgotPassword
       tags: [Auth]
       security: []
@@ -266,14 +255,11 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "404":
-          description: No account found with that email (dev only — will become a generic 200 in production)
+          description: No account found with that email (dev only)
 
   /api/auth/reset-password:
     post:
       summary: Reset password using a reset token
-      description: |
-        Validates the reset token, updates the user's password, marks the token as used,
-        and revokes all active refresh tokens for that user (forcing re-login everywhere).
       operationId: resetPassword
       tags: [Auth]
       security: []
@@ -297,37 +283,29 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
 
-  /api/files/path:
+  /api/folders:
     get:
-      summary: Get the user's watched directory path
-      description: Returns the authenticated user's saved watched directory path.
-      operationId: getWatchedPath
-      tags: [Files]
+      summary: List all watched folders with stats
+      description: Returns all watched folders for the authenticated user, each with aggregate stats (file count, total size, last backup time).
+      operationId: getFolders
+      tags: [Folders]
       security:
         - CookieAuth: []
         - BearerAuth: []
       responses:
         "200":
-          description: Watched path
+          description: Folder list with stats
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WatchedPathResponse"
+                $ref: "#/components/schemas/FolderStatsResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-    put:
-      summary: Set or update the user's watched directory path
-      description: |
-        Creates or replaces the authenticated user's watched directory path.
-        Each user has at most one watched path — this upserts it.
-
-        **Side effect on path change:** if the new path differs from the previous one, all
-        backed-up file objects and `file_backups` DB records for this user are deleted.
-        Both deletions are best-effort (failures are logged but not surfaced to the client).
-      operationId: setWatchedPath
-      tags: [Files]
+    post:
+      summary: Add a new watched folder
+      description: Creates a new watched folder for the authenticated user. Multiple folders per user are supported.
+      operationId: addFolder
+      tags: [Folders]
       security:
         - CookieAuth: []
         - BearerAuth: []
@@ -336,26 +314,58 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SetWatchedPathRequest"
+              $ref: "#/components/schemas/AddFolderRequest"
       responses:
-        "200":
-          description: Watched path saved
+        "201":
+          description: Folder created
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WatchedPathResponse"
+                $ref: "#/components/schemas/FolderResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
-  /api/files/:
-    get:
-      summary: Get the stored file list for the user's watched path
+  /api/folders/{folderID}:
+    parameters:
+      - name: folderID
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+        description: Watched folder ID
+    delete:
+      summary: Delete a watched folder
       description: |
-        Returns all files and directories last synced for the user's watched path.
-        Returns 404 if no watched path has been set.
-      operationId: getFiles
+        Removes a watched folder and all its backed-up objects from object storage.
+        The `watched_files` and `file_backups` rows are cascade-deleted via the DB FK.
+        Storage deletions are best-effort.
+      operationId: deleteFolder
+      tags: [Folders]
+      security:
+        - CookieAuth: []
+        - BearerAuth: []
+      responses:
+        "204":
+          description: Folder deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/folders/{folderID}/files:
+    parameters:
+      - name: folderID
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    get:
+      summary: Get the stored file list for a folder
+      operationId: getFolderFiles
       tags: [Files]
       security:
         - CookieAuth: []
@@ -372,14 +382,20 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /api/files/sync:
+  /api/folders/{folderID}/sync:
+    parameters:
+      - name: folderID
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
     put:
-      summary: Replace the stored file list
+      summary: Replace the stored file list for a folder
       description: |
-        Atomically replaces the entire stored file list for the user's watched path.
-        The incoming `files` array is the complete current state of the directory —
-        not a delta. Returns 404 if no watched path has been set.
-      operationId: syncFiles
+        Atomically replaces the entire stored file list for the folder.
+        The incoming `files` array is the complete current state — not a delta.
+      operationId: syncFolderFiles
       tags: [Files]
       security:
         - CookieAuth: []
@@ -400,11 +416,17 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /api/files/backups:
+  /api/folders/{folderID}/backups:
+    parameters:
+      - name: folderID
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
     get:
-      summary: List all backed-up files for the current user
-      description: Returns every backup record for the authenticated user, ordered by relative_path. Used by the Electron client to seed per-file status indicators on startup.
-      operationId: listFileBackups
+      summary: List all backed-up files for a folder
+      operationId: listFolderBackups
       tags: [Backup]
       security:
         - CookieAuth: []
@@ -424,9 +446,17 @@ paths:
                       $ref: "#/components/schemas/FileBackupRecord"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
-  /api/files/backup/{relative_path}:
+  /api/folders/{folderID}/backup/{relative_path}:
     parameters:
+      - name: folderID
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
       - name: relative_path
         in: path
         required: true
@@ -434,8 +464,7 @@ paths:
           type: string
         description: |
           POSIX-style path relative to the watched root (e.g. `photos/2024/img.jpg`).
-          Each segment is percent-encoded; slashes are preserved.
-          Must not contain `..`.
+          Each segment is percent-encoded; slashes are preserved. Must not contain `..`.
         example: photos/2024/img.jpg
     put:
       summary: Upload a file for backup
@@ -443,11 +472,8 @@ paths:
         Streams the request body into object storage.
 
         **Deduplication:** if the `X-Checksum-SHA256` header matches the stored checksum
-        for this path, the upload is skipped and `skipped: true` is returned — the body
-        is never read. This makes repeated syncs efficient for unchanged files.
-
-        When the watched path changes, all backed-up content is automatically deleted.
-      operationId: uploadFile
+        for this path, the upload is skipped and `skipped: true` is returned.
+      operationId: uploadFolderFile
       tags: [Backup]
       security:
         - CookieAuth: []
@@ -459,14 +485,12 @@ paths:
           schema:
             type: string
           description: Hex-encoded SHA-256 of the file bytes.
-          example: a1b2c3d4e5f6...
         - name: X-File-Size
           in: header
           required: true
           schema:
             type: integer
-          description: Exact byte count of the file. Used for the DB record and response.
-          example: 204800
+          description: Exact byte count of the file.
       requestBody:
         required: true
         content:
@@ -485,6 +509,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "500":
           description: Storage or database failure
           content:
@@ -494,7 +520,7 @@ paths:
     get:
       summary: Download a backed-up file
       description: Streams the backed-up file bytes from object storage.
-      operationId: downloadFile
+      operationId: downloadFolderFile
       tags: [Backup]
       security:
         - CookieAuth: []
@@ -534,9 +560,7 @@ components:
       name: access_token
       description: |
         **Primary auth mechanism.** HttpOnly `access_token` cookie (SameSite=Lax, 1 minute TTL)
-        set automatically by login/register/refresh. Insomnia captures it via the cookie jar —
-        enable "Send Cookies" and run POST /api/auth/login first; all subsequent requests are
-        authenticated automatically.
+        set automatically by login/register/refresh. Insomnia captures it via the cookie jar.
     BearerAuth:
       type: http
       scheme: bearer
@@ -554,7 +578,7 @@ components:
           example: ok
         version:
           type: string
-          example: 0.2.0
+          example: 0.3.0
 
     SessionResponse:
       type: object
@@ -586,11 +610,9 @@ components:
         access_token:
           type: string
           description: JWT access token (expires in 1 minute)
-          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
         refresh_token:
           type: string
           description: Opaque refresh token (expires in 30 days)
-          example: dGhpcyBpcyBhIHJhbmRvbSB0b2tlbg==
         user:
           $ref: "#/components/schemas/UserInfo"
 
@@ -636,18 +658,14 @@ components:
       properties:
         refresh_token:
           type: string
-          description: |
-            The opaque refresh token previously issued by login or register.
-            Optional when sending the refresh_token cookie (cookie takes precedence).
+          description: Optional when sending the refresh_token cookie.
 
     LogoutRequest:
       type: object
       properties:
         refresh_token:
           type: string
-          description: |
-            The refresh token to revoke. Optional — used by clients that cannot send cookies
-            (e.g. Electron from a file:// origin). Browser clients rely on the cookie instead.
+          description: Optional — used by clients that cannot send cookies.
 
     ForgotPasswordRequest:
       type: object
@@ -668,7 +686,6 @@ components:
         reset_token:
           type: string
           description: "DEV ONLY — will be removed when email delivery is added"
-          example: dGhpcyBpcyBhIHJhbmRvbSB0b2tlbg==
         _dev_note:
           type: string
 
@@ -682,7 +699,7 @@ components:
           type: string
           format: password
 
-    SetWatchedPathRequest:
+    AddFolderRequest:
       type: object
       required: [path]
       properties:
@@ -690,10 +707,14 @@ components:
           type: string
           description: Absolute path to the local directory to watch
           example: /home/user/documents
+        name:
+          type: string
+          description: User-visible label (defaults to last path segment if omitted)
+          example: Documents
 
-    WatchedPathResponse:
+    FolderResponse:
       type: object
-      required: [id, path, updated_at]
+      required: [id, path, name, created_at]
       properties:
         id:
           type: integer
@@ -701,9 +722,47 @@ components:
         path:
           type: string
           example: /home/user/documents
-        updated_at:
+        name:
+          type: string
+          example: Documents
+        created_at:
           type: string
           format: date-time
+
+    FolderStats:
+      type: object
+      required: [id, path, name, file_count, total_size_bytes]
+      properties:
+        id:
+          type: integer
+          format: int64
+        path:
+          type: string
+          example: /home/user/documents
+        name:
+          type: string
+          example: Documents
+        file_count:
+          type: integer
+          example: 42
+        total_size_bytes:
+          type: integer
+          format: int64
+          example: 104857600
+        last_backed_up_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null when no files have been backed up yet
+
+    FolderStatsResponse:
+      type: object
+      required: [folders]
+      properties:
+        folders:
+          type: array
+          items:
+            $ref: "#/components/schemas/FolderStats"
 
     FileEntry:
       type: object
@@ -712,20 +771,15 @@ components:
         name:
           type: string
           example: img.jpg
-          description: Bare filename or directory name (no path separators)
         relative_path:
           type: string
           example: photos/2024/img.jpg
-          description: |
-            POSIX path relative to the watched root directory.
-            Top-level entries have relative_path equal to name.
-            Subdirectory entries use forward-slash separators, e.g. "src/main.go".
+          description: POSIX path relative to the watched root.
         is_directory:
           type: boolean
         size:
           type: integer
           format: int64
-          description: File size in bytes (0 for directories)
         modified_ms:
           type: integer
           format: int64
@@ -768,9 +822,12 @@ components:
 
     FileBackupRecord:
       type: object
-      required: [id, relative_path, size, checksum_sha256, backed_up_at, version]
+      required: [id, watched_path_id, relative_path, size, checksum_sha256, backed_up_at, version]
       properties:
         id:
+          type: integer
+          format: int64
+        watched_path_id:
           type: integer
           format: int64
         relative_path:
@@ -798,22 +855,14 @@ components:
         size:
           type: integer
           format: int64
-          description: File size in bytes
-          example: 3145728
         checksum_sha256:
           type: string
-          description: Hex-encoded SHA-256 provided by the client
-          example: a1b2c3d4e5f6...
         backed_up_at:
           type: string
           format: date-time
-          example: "2026-04-10T14:32:00Z"
         version:
           type: integer
-          description: |
-            Monotonically increasing counter for this file. Starts at 1 on the first
-            backup; increments by 1 each time the file content changes and is re-uploaded.
-            Unchanged on a skipped upload.
+          description: Increments on each content change; unchanged on a skipped upload.
           example: 3
         skipped:
           type: boolean

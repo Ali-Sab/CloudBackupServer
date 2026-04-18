@@ -432,3 +432,53 @@ button.link-btn:hover { color: var(--color-primary); }
   margin-bottom: 12px;
   padding: 8px 12px;
 }
+
+/* ---- Dashboard ---- */
+.dashboard { width: 100%; max-width: 860px; }
+.dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.folder-list { display: flex; flex-direction: column; gap: 12px; }
+.folder-list-empty {
+  color: var(--color-muted);
+  font-style: italic;
+  text-align: center;
+  padding: 40px 0;
+}
+
+.folder-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 18px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  transition: border-color 0.15s;
+}
+.folder-card:hover { border-color: var(--color-primary); }
+
+.folder-card-body  { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.folder-card-icon  { font-size: 1.6rem; flex-shrink: 0; }
+.folder-card-info  { min-width: 0; }
+.folder-card-name  {
+  font-weight: 600;
+  font-size: 1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.folder-card-path  {
+  font-size: 0.78rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.folder-card-stats { font-size: 0.8rem; color: var(--color-muted); margin-top: 2px; }
+.folder-card-actions { display: flex; gap: 8px; flex-shrink: 0; }

@@ -50,46 +50,55 @@
       });
     },
 
-    // ---- Files ----
+    // ---- Folders ----
 
-    /** Returns { id, path, updated_at } or null if no path is saved. */
-    getWatchedPath() {
-      return APIClient.request('/api/files/path');
+    /** Returns { folders: [...FolderStats] } */
+    getFolders() {
+      return APIClient.request('/api/folders');
     },
 
-    /** Sets/replaces the watched path. Body: { path }. Returns { id, path, updated_at }. */
-    setWatchedPath(path) {
-      return APIClient.put('/api/files/path', { path });
+    /** Creates a new watched folder. Body: { path, name? }. Returns FolderResponse. */
+    addFolder(path, name) {
+      return APIClient.post('/api/folders', { path, name: name || '' });
     },
 
-    /** Returns { files: [...] } — the last-synced file list. */
-    getFiles() {
-      return APIClient.request('/api/files/');
+    /** Deletes a folder and all its backups. */
+    removeFolder(id) {
+      return APIClient.request('/api/folders/' + id, { method: 'DELETE' });
     },
 
-    /**
-     * Atomically replaces the stored file list.
-     * @param {Array<{name, is_directory, size, modified_ms}>} files
-     */
-    syncFiles(files) {
-      return APIClient.put('/api/files/sync', { files });
-    },
+    // ---- Per-folder files ----
 
-    // ---- Backup ----
-
-    /** Returns { backups: [...] } — all backup records for the user. */
-    getFileBackups() {
-      return APIClient.request('/api/files/backups');
+    /** Returns { files: [...] } for the given folder. */
+    getFolderFiles(id) {
+      return APIClient.request('/api/folders/' + id + '/files');
     },
 
     /**
-     * Download a backed-up file. Returns a raw Response with the binary body.
-     * Use response.blob() or response.arrayBuffer() to access the bytes.
-     * @param {string} relativePath  - e.g. "photos/2024/img.jpg"
+     * Atomically replaces the stored file list for a folder.
+     * @param {number} id
+     * @param {Array<{name, relative_path, is_directory, size, modified_ms}>} files
      */
-    downloadFile(relativePath) {
+    syncFolderFiles(id, files) {
+      return APIClient.put('/api/folders/' + id + '/sync', { files });
+    },
+
+    // ---- Per-folder backups ----
+
+    /** Returns { backups: [...] } for the given folder. */
+    getFolderBackups(id) {
+      return APIClient.request('/api/folders/' + id + '/backups');
+    },
+
+    /**
+     * Download a backed-up file from a specific folder.
+     * Returns a raw Response with the binary body.
+     * @param {number} id           - folder ID
+     * @param {string} relativePath - e.g. "photos/2024/img.jpg"
+     */
+    downloadFromFolder(id, relativePath) {
       const encoded = relativePath.split('/').map(encodeURIComponent).join('/');
-      return APIClient.request('/api/files/backup/' + encoded);
+      return APIClient.request('/api/folders/' + id + '/backup/' + encoded);
     },
   };
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pressly/goose/v3"
@@ -197,73 +198,114 @@ func MarkPasswordResetTokenUsed(ctx context.Context, pool *pgxpool.Pool, id int6
 	return nil
 }
 
-// ---- Watched paths ----
+// ---- Watched paths / folders ----
 
-// SetWatchedPath upserts the user's watched directory path.
-// Each user may have at most one watched path; this replaces it if it already exists.
-// If the path changes, the stale watched_files are cleared atomically in the same transaction.
-//
-// The second return value is true when the path actually changed (i.e. there was an
-// existing row and its path differed from the new value). Callers can use this to
-// trigger cleanup of backed-up content in object storage.
-func SetWatchedPath(ctx context.Context, pool *pgxpool.Pool, userID int64, path string) (*models.WatchedPath, bool, error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return nil, false, fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	// Snapshot the existing path (if any) before the upsert.
-	var oldPathID int64
-	var oldPath string
-	hadExisting := true
-	if err := tx.QueryRow(ctx,
-		`SELECT id, path FROM watched_paths WHERE user_id = $1`, userID,
-	).Scan(&oldPathID, &oldPath); err != nil {
-		hadExisting = false
-	}
-
-	wp := &models.WatchedPath{}
-	if err := tx.QueryRow(ctx,
-		`INSERT INTO watched_paths (user_id, path)
-		 VALUES ($1, $2)
-		 ON CONFLICT (user_id) DO UPDATE
-		   SET path = EXCLUDED.path, updated_at = NOW()
-		 RETURNING id, user_id, path, created_at, updated_at`,
-		userID, path,
-	).Scan(&wp.ID, &wp.UserID, &wp.Path, &wp.CreatedAt, &wp.UpdatedAt); err != nil {
-		return nil, false, fmt.Errorf("setting watched path: %w", err)
-	}
-
-	pathChanged := hadExisting && oldPath != path
-
-	// Clear the file list when the path changes — the old files describe a different directory.
-	if pathChanged {
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM watched_files WHERE path_id = $1`, oldPathID,
-		); err != nil {
-			return nil, false, fmt.Errorf("clearing stale watched files: %w", err)
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, false, fmt.Errorf("committing watched path: %w", err)
-	}
-	return wp, pathChanged, nil
-}
-
-// GetWatchedPathByUserID returns the user's watched path, or an error if none is set.
-func GetWatchedPathByUserID(ctx context.Context, pool *pgxpool.Pool, userID int64) (*models.WatchedPath, error) {
+// AddWatchedPath inserts a new watched directory for the user.
+// Multiple paths per user are allowed.
+func AddWatchedPath(ctx context.Context, pool *pgxpool.Pool, userID int64, path, name string) (*models.WatchedPath, error) {
 	wp := &models.WatchedPath{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, user_id, path, created_at, updated_at
-		 FROM watched_paths WHERE user_id = $1`,
-		userID,
-	).Scan(&wp.ID, &wp.UserID, &wp.Path, &wp.CreatedAt, &wp.UpdatedAt)
+		`INSERT INTO watched_paths (user_id, path, name)
+		 VALUES ($1, $2, $3)
+		 RETURNING id, user_id, path, name, created_at, updated_at`,
+		userID, path, name,
+	).Scan(&wp.ID, &wp.UserID, &wp.Path, &wp.Name, &wp.CreatedAt, &wp.UpdatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("getting watched path: %w", err)
+		return nil, fmt.Errorf("adding watched path: %w", err)
 	}
 	return wp, nil
+}
+
+// GetWatchedPathsByUserID returns all watched paths for a user, ordered by created_at ASC.
+func GetWatchedPathsByUserID(ctx context.Context, pool *pgxpool.Pool, userID int64) ([]models.WatchedPath, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT id, user_id, path, name, created_at, updated_at
+		 FROM watched_paths WHERE user_id = $1
+		 ORDER BY created_at ASC`,
+		userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying watched paths: %w", err)
+	}
+	defer rows.Close()
+
+	var paths []models.WatchedPath
+	for rows.Next() {
+		var wp models.WatchedPath
+		if err := rows.Scan(&wp.ID, &wp.UserID, &wp.Path, &wp.Name, &wp.CreatedAt, &wp.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scanning watched path: %w", err)
+		}
+		paths = append(paths, wp)
+	}
+	if paths == nil {
+		paths = []models.WatchedPath{}
+	}
+	return paths, rows.Err()
+}
+
+// GetWatchedPathByID returns a watched path by id, verifying it belongs to userID.
+// Returns pgx.ErrNoRows (wrapped) if not found or not owned by this user.
+func GetWatchedPathByID(ctx context.Context, pool *pgxpool.Pool, id, userID int64) (*models.WatchedPath, error) {
+	wp := &models.WatchedPath{}
+	err := pool.QueryRow(ctx,
+		`SELECT id, user_id, path, name, created_at, updated_at
+		 FROM watched_paths WHERE id = $1 AND user_id = $2`,
+		id, userID,
+	).Scan(&wp.ID, &wp.UserID, &wp.Path, &wp.Name, &wp.CreatedAt, &wp.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("getting watched path by id: %w", err)
+	}
+	return wp, nil
+}
+
+// DeleteWatchedPath removes a watched path (and its watched_files and file_backups via CASCADE).
+// Returns pgx.ErrNoRows (wrapped) if not found or not owned by this user.
+func DeleteWatchedPath(ctx context.Context, pool *pgxpool.Pool, id, userID int64) error {
+	tag, err := pool.Exec(ctx,
+		`DELETE FROM watched_paths WHERE id = $1 AND user_id = $2`,
+		id, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("deleting watched path: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("watched path %d not found: %w", id, pgx.ErrNoRows)
+	}
+	return nil
+}
+
+// GetFolderStats returns dashboard aggregate rows for all of a user's watched paths.
+// Results are sorted by last_backed_up_at DESC NULLS LAST, then path ASC.
+func GetFolderStats(ctx context.Context, pool *pgxpool.Pool, userID int64) ([]models.FolderStats, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT wp.id, wp.path, wp.name,
+		        COUNT(fb.id)               AS file_count,
+		        COALESCE(SUM(fb.size), 0)  AS total_size_bytes,
+		        MAX(fb.backed_up_at)       AS last_backed_up_at
+		 FROM   watched_paths wp
+		 LEFT JOIN file_backups fb ON fb.watched_path_id = wp.id
+		 WHERE  wp.user_id = $1
+		 GROUP  BY wp.id, wp.path, wp.name
+		 ORDER  BY last_backed_up_at DESC NULLS LAST, wp.path ASC`,
+		userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying folder stats: %w", err)
+	}
+	defer rows.Close()
+
+	var stats []models.FolderStats
+	for rows.Next() {
+		var s models.FolderStats
+		if err := rows.Scan(&s.ID, &s.Path, &s.Name, &s.FileCount, &s.TotalSizeBytes, &s.LastBackedUpAt); err != nil {
+			return nil, fmt.Errorf("scanning folder stats: %w", err)
+		}
+		stats = append(stats, s)
+	}
+	if stats == nil {
+		stats = []models.FolderStats{}
+	}
+	return stats, rows.Err()
 }
 
 // ---- Watched files ----
@@ -329,20 +371,20 @@ func GetWatchedFiles(ctx context.Context, pool *pgxpool.Pool, pathID int64) ([]m
 // ---- File backups ----
 
 // UpsertFileBackup inserts or updates a backup record for a single file.
-// The unique constraint is (user_id, relative_path) — safe to call repeatedly.
+// The unique constraint is (watched_path_id, relative_path) — safe to call repeatedly.
 // On conflict the record is updated and Version is incremented by 1.
 func UpsertFileBackup(ctx context.Context, pool *pgxpool.Pool, b *models.FileBackup) error {
 	err := pool.QueryRow(ctx,
-		`INSERT INTO file_backups (user_id, relative_path, size, checksum_sha256, object_key)
-		 VALUES ($1, $2, $3, $4, $5)
-		 ON CONFLICT (user_id, relative_path) DO UPDATE
+		`INSERT INTO file_backups (user_id, watched_path_id, relative_path, size, checksum_sha256, object_key)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 ON CONFLICT (watched_path_id, relative_path) DO UPDATE
 		   SET size            = EXCLUDED.size,
 		       checksum_sha256 = EXCLUDED.checksum_sha256,
 		       object_key      = EXCLUDED.object_key,
 		       backed_up_at    = NOW(),
 		       version         = file_backups.version + 1
 		 RETURNING id, backed_up_at, version`,
-		b.UserID, b.RelativePath, b.Size, b.ChecksumSHA256, b.ObjectKey,
+		b.UserID, b.WatchedPathID, b.RelativePath, b.Size, b.ChecksumSHA256, b.ObjectKey,
 	).Scan(&b.ID, &b.BackedUpAt, &b.Version)
 	if err != nil {
 		return fmt.Errorf("upserting file backup: %w", err)
@@ -350,27 +392,27 @@ func UpsertFileBackup(ctx context.Context, pool *pgxpool.Pool, b *models.FileBac
 	return nil
 }
 
-// GetFileBackup returns the backup record for a specific user + relative path.
-// Returns pgx.ErrNoRows (wrapped) if no backup exists for that path.
-func GetFileBackup(ctx context.Context, pool *pgxpool.Pool, userID int64, relativePath string) (*models.FileBackup, error) {
+// GetFileBackup returns the backup record for a specific watched path + relative path.
+// Returns pgx.ErrNoRows (wrapped) if no backup exists.
+func GetFileBackup(ctx context.Context, pool *pgxpool.Pool, watchedPathID int64, relativePath string) (*models.FileBackup, error) {
 	b := &models.FileBackup{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, user_id, relative_path, size, checksum_sha256, object_key, backed_up_at, version
-		 FROM file_backups WHERE user_id = $1 AND relative_path = $2`,
-		userID, relativePath,
-	).Scan(&b.ID, &b.UserID, &b.RelativePath, &b.Size, &b.ChecksumSHA256, &b.ObjectKey, &b.BackedUpAt, &b.Version)
+		`SELECT id, user_id, watched_path_id, relative_path, size, checksum_sha256, object_key, backed_up_at, version
+		 FROM file_backups WHERE watched_path_id = $1 AND relative_path = $2`,
+		watchedPathID, relativePath,
+	).Scan(&b.ID, &b.UserID, &b.WatchedPathID, &b.RelativePath, &b.Size, &b.ChecksumSHA256, &b.ObjectKey, &b.BackedUpAt, &b.Version)
 	if err != nil {
 		return nil, fmt.Errorf("getting file backup: %w", err)
 	}
 	return b, nil
 }
 
-// GetFileBackupsByUserID returns all backup records for a user, ordered by relative_path.
-func GetFileBackupsByUserID(ctx context.Context, pool *pgxpool.Pool, userID int64) ([]models.FileBackup, error) {
+// GetFileBackupsByWatchedPathID returns all backup records for a watched path, ordered by relative_path.
+func GetFileBackupsByWatchedPathID(ctx context.Context, pool *pgxpool.Pool, watchedPathID int64) ([]models.FileBackup, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT id, user_id, relative_path, size, checksum_sha256, object_key, backed_up_at, version
-		 FROM file_backups WHERE user_id = $1 ORDER BY relative_path ASC`,
-		userID,
+		`SELECT id, user_id, watched_path_id, relative_path, size, checksum_sha256, object_key, backed_up_at, version
+		 FROM file_backups WHERE watched_path_id = $1 ORDER BY relative_path ASC`,
+		watchedPathID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying file backups: %w", err)
@@ -380,7 +422,7 @@ func GetFileBackupsByUserID(ctx context.Context, pool *pgxpool.Pool, userID int6
 	var backups []models.FileBackup
 	for rows.Next() {
 		var b models.FileBackup
-		if err := rows.Scan(&b.ID, &b.UserID, &b.RelativePath, &b.Size, &b.ChecksumSHA256, &b.ObjectKey, &b.BackedUpAt, &b.Version); err != nil {
+		if err := rows.Scan(&b.ID, &b.UserID, &b.WatchedPathID, &b.RelativePath, &b.Size, &b.ChecksumSHA256, &b.ObjectKey, &b.BackedUpAt, &b.Version); err != nil {
 			return nil, fmt.Errorf("scanning file backup: %w", err)
 		}
 		backups = append(backups, b)
@@ -389,16 +431,4 @@ func GetFileBackupsByUserID(ctx context.Context, pool *pgxpool.Pool, userID int6
 		backups = []models.FileBackup{}
 	}
 	return backups, rows.Err()
-}
-
-// DeleteFileBackupsByUserID deletes all backup records for a user.
-// Called after a watched path change — the old backed-up content is stale.
-func DeleteFileBackupsByUserID(ctx context.Context, pool *pgxpool.Pool, userID int64) error {
-	_, err := pool.Exec(ctx,
-		`DELETE FROM file_backups WHERE user_id = $1`, userID,
-	)
-	if err != nil {
-		return fmt.Errorf("deleting file backups for user %d: %w", userID, err)
-	}
-	return nil
 }

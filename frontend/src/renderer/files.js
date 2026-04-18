@@ -2,12 +2,16 @@
  * File browser UI — recursive directory tree with drill-down navigation.
  *
  * Depends on:
- *   window.electronAPI  (selectDirectory, readDirectory, watchDirectory,
- *                        unwatchDirectory, onDirectoryChange)
- *   window.API          (getWatchedPath, setWatchedPath, syncFiles)
+ *   window.electronAPI  (readDirectory, watchDirectory, unwatchDirectory,
+ *                        onDirectoryChange, checksumFile, uploadFile, saveFile)
+ *   window.API          (getFolderFiles, syncFolderFiles, getFolderBackups,
+ *                        downloadFromFolder)
+ *   window.Dashboard    (show)
  *   window.UI           (toast)
  *
  * Exposes: window.Files = { show, hide }
+ *   show(folderId, folderPath) — opens the browser for a specific watched folder
+ *   hide()                    — closes the browser
  *
  * Navigation model
  * ────────────────
@@ -66,6 +70,7 @@ if (typeof module !== 'undefined') {
 
   const electronAPI = window.electronAPI;
 
+  let currentFolderId = null;
   let currentPath = null;
 
   // Full flat entry list from the most recent disk read.
@@ -79,7 +84,6 @@ if (typeof module !== 'undefined') {
 
   // Per-file backup status. Keys are relativePath strings.
   // Values: 'uploading' | 'done' | 'outdated' | 'error'
-  // Files absent from the map have no known status (not yet backed up this session).
   const uploadStatus = new Map();
 
   // Backup records for files that exist in the cloud but not locally.
@@ -87,32 +91,33 @@ if (typeof module !== 'undefined') {
   const cloudOnlyFiles = new Map();
 
   // Register the live-watch listener once at module startup.
-  // skipUpload: true — live-watch refreshes only update the metadata view.
-  // File content uploads are triggered by explicit user-initiated syncs only.
   electronAPI.onDirectoryChange(function () {
     if (currentPath) refreshDirectory(currentPath, { silent: true, skipUpload: true });
   });
 
   // ---- Public interface ---------------------------------------------------
 
-  async function show() {
+  async function show(folderId, folderPath) {
+    currentFolderId = folderId;
+    currentPath = folderPath;
+    viewStack = [];
+    expandedPaths.clear();
+    uploadStatus.clear();
+    cloudOnlyFiles.clear();
+
     const el = document.getElementById('file-browser');
     el.classList.remove('hidden');
     renderScaffold(el);
 
+    document.getElementById('current-path').textContent = folderPath;
+    setBackupButtonEnabled(true);
+
     try {
-      const resp = await window.API.getWatchedPath();
-      if (resp.ok) {
-        const data = await resp.json();
-        currentPath = data.path;
-        document.getElementById('current-path').textContent = data.path;
-        setBackupButtonEnabled(true);
-        await electronAPI.watchDirectory(data.path);
-        await refreshDirectory(data.path, { silent: true });
-        loadBackupStatuses(); // fire-and-forget: scans checksums progressively in background
-      }
+      await electronAPI.watchDirectory(folderPath);
+      await refreshDirectory(folderPath, { silent: true });
+      loadBackupStatuses();
     } catch {
-      // Not critical — user can still pick a folder manually.
+      // Non-critical — directory may not exist yet.
     }
   }
 
@@ -120,6 +125,7 @@ if (typeof module !== 'undefined') {
     const el = document.getElementById('file-browser');
     el.classList.add('hidden');
     el.innerHTML = '';
+    currentFolderId = null;
     currentPath = null;
     allEntries = [];
     viewStack = [];
@@ -129,20 +135,17 @@ if (typeof module !== 'undefined') {
     electronAPI.unwatchDirectory();
   }
 
-  // Fetch backup records from the server, then verify each file's local checksum.
-  // Sets 'done' if the checksum matches, 'outdated' if the file has changed since
-  // the last backup, or leaves the entry absent if the file can't be read locally.
-  // Re-renders progressively after each file so icons appear as scanning completes.
+  // ---- Backup status loading ----------------------------------------------
+
   async function loadBackupStatuses() {
-    if (!currentPath) return;
+    if (!currentPath || !currentFolderId) return;
     try {
-      const resp = await window.API.getFileBackups();
+      const resp = await window.API.getFolderBackups(currentFolderId);
       if (!resp.ok) return;
       const data = await resp.json();
       for (const b of data.backups) {
         const result = await electronAPI.checksumFile(currentPath, b.relative_path);
         if (result.error) {
-          // File missing locally — show it as a cloud-only entry.
           cloudOnlyFiles.set(b.relative_path, b);
         } else {
           uploadStatus.set(
@@ -158,8 +161,6 @@ if (typeof module !== 'undefined') {
   }
 
   // ---- Scaffold -----------------------------------------------------------
-  // Creates the stable card HTML once; subsequent renders only update
-  // #breadcrumb and #file-list without touching the rest of the card.
 
   function renderScaffold(el) {
     el.className = 'file-browser';
@@ -171,16 +172,19 @@ if (typeof module !== 'undefined') {
           </div>
           <div class="file-browser-actions">
             <button id="backup-now-btn" disabled>Backup Now</button>
-            <button id="select-dir-btn">Select Folder</button>
+            <button id="all-folders-btn">← All Folders</button>
           </div>
         </div>
         <p id="current-path" class="file-current-path"></p>
         <ul id="file-list" class="file-list">
-          <li class="file-item file-empty">No folder selected</li>
+          <li class="file-item file-empty">Loading…</li>
         </ul>
       </div>
     `;
-    document.getElementById('select-dir-btn').addEventListener('click', handleSelectDirectory);
+    document.getElementById('all-folders-btn').addEventListener('click', function () {
+      hide();
+      window.Dashboard.show();
+    });
     document.getElementById('backup-now-btn').addEventListener('click', backupNow);
   }
 
@@ -189,33 +193,10 @@ if (typeof module !== 'undefined') {
     if (btn) btn.disabled = !enabled;
   }
 
-  // ---- Select & refresh ---------------------------------------------------
-
-  async function handleSelectDirectory() {
-    const dirPath = await electronAPI.selectDirectory();
-    if (!dirPath) return;
-
-    currentPath = dirPath;
-    viewStack = [];
-    expandedPaths.clear();
-    uploadStatus.clear();
-    cloudOnlyFiles.clear();
-    document.getElementById('current-path').textContent = dirPath;
-    setBackupButtonEnabled(true);
-    await electronAPI.watchDirectory(dirPath);
-
-    try {
-      const resp = await window.API.setWatchedPath(dirPath);
-      window.UI.toast(resp.ok ? 'Folder saved to server' : 'Could not save folder to server', resp.ok ? 'success' : 'error');
-    } catch {
-      window.UI.toast('Could not reach server', 'error');
-    }
-
-    await refreshDirectory(dirPath);
-  }
+  // ---- Backup -------------------------------------------------------------
 
   async function backupNow() {
-    if (!currentPath) return;
+    if (!currentPath || !currentFolderId) return;
 
     const btn = document.getElementById('backup-now-btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Backing up…'; }
@@ -244,12 +225,10 @@ if (typeof module !== 'undefined') {
 
   /**
    * Read the full directory tree from disk, cache entries, sync metadata to backend,
-   * then re-render the current view (breadcrumb + file list).
-   *
-   * File content uploads are never triggered here — use the Backup Now button.
+   * then re-render the current view.
    *
    * @param {string} dirPath
-   * @param {{ silent?: boolean }} [opts]  silent = no sync toast
+   * @param {{ silent?: boolean }} [opts]
    */
   async function refreshDirectory(dirPath, opts) {
     let entries;
@@ -264,7 +243,6 @@ if (typeof module !== 'undefined') {
     allEntries = entries;
     renderView();
 
-    // Sync metadata to backend (non-blocking — failures don't affect the UI).
     const files = entries.map(function (e) {
       return {
         name: e.name,
@@ -276,7 +254,7 @@ if (typeof module !== 'undefined') {
     });
 
     try {
-      const resp = await window.API.syncFiles(files);
+      const resp = await window.API.syncFolderFiles(currentFolderId, files);
       if (resp.ok && !opts?.silent) {
         window.UI.toast('File list synced (' + files.length + ' item' + (files.length === 1 ? '' : 's') + ')');
       }
@@ -286,17 +264,15 @@ if (typeof module !== 'undefined') {
   }
 
   /**
-   * Upload file content for each entry to the backend backup endpoint.
-   * Runs sequentially to avoid saturating the connection on large directories.
-   * Shows a single summary toast when done.
+   * Upload file content for each entry to the backup endpoint for the current folder.
    *
    * @param {string} rootPath
-   * @param {Array} fileEntries  - non-directory entries from readDirectory
+   * @param {Array} fileEntries
    */
   async function uploadFiles(rootPath, fileEntries) {
     if (fileEntries.length === 0) return;
 
-    const apiBaseUrl = window.APIClient.BASE_URL;
+    const uploadBase = window.APIClient.BASE_URL + '/api/folders/' + currentFolderId + '/backup';
     const accessToken = window.TokenStore.getAccessToken();
     const results = [];
 
@@ -309,7 +285,7 @@ if (typeof module !== 'undefined') {
         result = await electronAPI.uploadFile(
           rootPath,
           entry.relativePath,
-          apiBaseUrl,
+          uploadBase,
           accessToken
         );
         if (result.error) {
@@ -332,17 +308,12 @@ if (typeof module !== 'undefined') {
 
   // ---- View rendering -----------------------------------------------------
 
-  /**
-   * Render the breadcrumb and file list for the current viewStack position.
-   * Called after every navigation action and after every directory refresh.
-   */
   function renderView() {
     renderBreadcrumb();
 
     const listEl = document.getElementById('file-list');
     if (!listEl) return;
 
-    // Merge local entries with cloud-only synthetic entries for rendering.
     const combined = allEntries.slice();
     for (const [relPath, b] of cloudOnlyFiles) {
       if (!combined.some(function (e) { return e.relativePath === relPath; })) {
@@ -374,17 +345,6 @@ if (typeof module !== 'undefined') {
     }
   }
 
-  /**
-   * Render the breadcrumb navigation header into #breadcrumb.
-   *
-   * When at root (viewStack empty):
-   *   📁 documents
-   *
-   * When drilled in (viewStack = [{name:'photos'},{name:'2024'}]):
-   *   ← Back   📁 documents › photos › 2024
-   *
-   * Every segment is a button that navigates back to that depth.
-   */
   function renderBreadcrumb() {
     const el = document.getElementById('breadcrumb');
     if (!el) return;
@@ -397,14 +357,12 @@ if (typeof module !== 'undefined') {
       return;
     }
 
-    // Use just the last segment of the OS path as the root label.
     const rootName = currentPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || 'Root';
 
     const nav = document.createElement('nav');
     nav.className = 'breadcrumb';
     nav.setAttribute('aria-label', 'Folder navigation');
 
-    // ← Back button (shown when not at root)
     if (viewStack.length > 0) {
       const back = document.createElement('button');
       back.className = 'breadcrumb-back';
@@ -414,7 +372,6 @@ if (typeof module !== 'undefined') {
       nav.appendChild(back);
     }
 
-    // Root segment
     const rootBtn = document.createElement('button');
     rootBtn.className = 'breadcrumb-seg' + (viewStack.length === 0 ? ' active' : '');
     rootBtn.setAttribute('title', currentPath);
@@ -422,7 +379,6 @@ if (typeof module !== 'undefined') {
     rootBtn.addEventListener('click', function () { navigateTo(0); });
     nav.appendChild(rootBtn);
 
-    // One button per drill-down level
     viewStack.forEach(function (seg, i) {
       const sep = document.createElement('span');
       sep.className = 'breadcrumb-sep';
@@ -445,14 +401,6 @@ if (typeof module !== 'undefined') {
 
   // ---- Navigation ---------------------------------------------------------
 
-  /**
-   * Drill into a directory — set viewStack to the full path from root and re-render.
-   *
-   * We rebuild the full stack from relativePath rather than just pushing the
-   * entry, so that clicking a folder that is visible inside an expanded
-   * parent (without having navigated into the parent first) correctly lands
-   * at the right depth instead of falling back to root.
-   */
   function navigateInto(entry) {
     const parts = entry.relativePath.split('/');
     viewStack = [];
@@ -464,26 +412,18 @@ if (typeof module !== 'undefined') {
     renderView();
   }
 
-  /**
-   * Navigate to an ancestor level.
-   * @param {number} depth  0 = root, 1 = first child, etc.
-   */
   function navigateTo(depth) {
     viewStack = viewStack.slice(0, depth);
     renderView();
   }
 
-  /**
-   * Walk the built tree to the node at the current viewStack position.
-   * Returns the root if any segment is missing (defensive).
-   */
   function resolveViewNode(tree) {
     let node = tree;
     for (const seg of viewStack) {
       if (node.children[seg.name]) {
         node = node.children[seg.name];
       } else {
-        return tree; // Fallback to root if path no longer exists.
+        return tree;
       }
     }
     return node;
@@ -491,15 +431,6 @@ if (typeof module !== 'undefined') {
 
   // ---- Tree building ------------------------------------------------------
 
-  /**
-   * Convert a flat entry array into a nested tree keyed by name.
-   *
-   * Input:  [{ name, relativePath, isDirectory, size, modified }, …]
-   * Output: { children: { [name]: { entry, children: {…} } } }
-   *
-   * Tree position is derived from relativePath (e.g. "photos/2024/img.jpg"
-   * becomes root › photos › 2024 › img.jpg).
-   */
   function buildTree(entries) {
     const root = { children: {} };
     for (const e of entries) {
@@ -522,19 +453,6 @@ if (typeof module !== 'undefined') {
 
   // ---- Tree rendering -----------------------------------------------------
 
-  /**
-   * Recursively render a level of the tree into `ul`.
-   *
-   * For directories:
-   *   [▶/▼ toggle]  📁  [name — clickable → navigateInto]
-   *   └─ (nested <ul.tree-children> when expanded)
-   *
-   * For files:
-   *   📄  [name]  [size]
-   *
-   * @param {HTMLUListElement} ul
-   * @param {Object.<string, TreeNode>} children
-   */
   function renderTree(ul, children) {
     const keys = Object.keys(children).sort(function (a, b) {
       const aIsDir = children[a].entry ? children[a].entry.isDirectory : true;
@@ -555,7 +473,6 @@ if (typeof module !== 'undefined') {
       if (isDir) {
         const isOpen = expandedPaths.has(relPath);
 
-        // ▶/▼ toggle — inline expand/collapse only
         const toggle = document.createElement('button');
         toggle.className = 'tree-toggle';
         toggle.textContent = isOpen ? '▼' : '▶';
@@ -565,7 +482,6 @@ if (typeof module !== 'undefined') {
         icon.className = 'file-icon';
         icon.textContent = '📁';
 
-        // Folder name — clicking navigates into the folder
         const nameEl = document.createElement('span');
         nameEl.className = 'file-name folder-link';
         nameEl.setAttribute('title', name + ' — click to open');
@@ -661,9 +577,9 @@ if (typeof module !== 'undefined') {
   // ---- Cloud download -----------------------------------------------------
 
   async function downloadCloudFile(relativePath) {
-    if (!currentPath) return;
+    if (!currentPath || !currentFolderId) return;
     try {
-      const resp = await window.API.downloadFile(relativePath);
+      const resp = await window.API.downloadFromFolder(currentFolderId, relativePath);
       if (!resp.ok) {
         window.UI.toast('Download failed: HTTP ' + resp.status, 'error');
         return;
@@ -685,10 +601,6 @@ if (typeof module !== 'undefined') {
 
   // ---- Helpers ------------------------------------------------------------
 
-  /**
-   * Middle-truncate a name to `max` chars: first half + … + last half.
-   * Returns safe HTML. Full name is always in the element's title attribute.
-   */
   function truncateName(name, max) {
     if (name.length <= max) return escapeHtml(name);
     const half = Math.floor((max - 1) / 2);

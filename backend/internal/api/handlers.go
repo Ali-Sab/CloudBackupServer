@@ -113,16 +113,23 @@ type ResetPasswordRequest struct {
 	NewPassword string `json:"new_password"`
 }
 
-// SetWatchedPathRequest is the body expected by PUT /api/files/path.
-type SetWatchedPathRequest struct {
+// AddFolderRequest is the body expected by POST /api/folders.
+type AddFolderRequest struct {
 	Path string `json:"path"`
+	Name string `json:"name,omitempty"`
 }
 
-// WatchedPathResponse is returned by GET and PUT /api/files/path.
-type WatchedPathResponse struct {
+// FolderStatsResponse is returned by GET /api/folders.
+type FolderStatsResponse struct {
+	Folders []models.FolderStats `json:"folders"`
+}
+
+// FolderResponse is returned by POST /api/folders.
+type FolderResponse struct {
 	ID        int64     `json:"id"`
 	Path      string    `json:"path"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // FileEntry describes a single file or directory sent by the client.
@@ -136,29 +143,29 @@ type FileEntry struct {
 	ModifiedMs   int64  `json:"modified_ms"`
 }
 
-// SyncWatchedFilesRequest is the body expected by PUT /api/files/sync.
+// SyncWatchedFilesRequest is the body expected by PUT /api/folders/{id}/sync.
 type SyncWatchedFilesRequest struct {
 	Files []FileEntry `json:"files"`
 }
 
-// WatchedFilesResponse is returned by GET /api/files.
+// WatchedFilesResponse is returned by GET /api/folders/{id}/files.
 type WatchedFilesResponse struct {
 	Files []models.WatchedFile `json:"files"`
 }
 
-// FileBackupsResponse is returned by GET /api/files/backups.
+// FileBackupsResponse is returned by GET /api/folders/{id}/backups.
 type FileBackupsResponse struct {
 	Backups []models.FileBackup `json:"backups"`
 }
 
-// UploadFileResponse is returned by PUT /api/files/backup/*.
+// UploadFileResponse is returned by PUT /api/folders/{id}/backup/*.
 type UploadFileResponse struct {
 	RelativePath   string    `json:"relative_path"`
 	Size           int64     `json:"size"`
 	ChecksumSHA256 string    `json:"checksum_sha256"`
 	BackedUpAt     time.Time `json:"backed_up_at"`
-	Version        int       `json:"version"`  // increments on each content change
-	Skipped        bool      `json:"skipped"`  // true when checksum matched — no upload occurred
+	Version        int       `json:"version"` // increments on each content change
+	Skipped        bool      `json:"skipped"` // true when checksum matched — no upload occurred
 }
 
 // ---- Handlers ----
@@ -284,18 +291,17 @@ func (h *Handler) PostRegister(w http.ResponseWriter, r *http.Request) {
 // PostRefresh handles POST /api/auth/refresh.
 // Validates the refresh token (from JSON body or cookie), rotates it (revoke old, issue new pair).
 func (h *Handler) PostRefresh(w http.ResponseWriter, r *http.Request) {
-	// Accept refresh_token from JSON body (Electron/Bearer clients) or cookie (browser clients).
+	// Try JSON body first (Electron/Bearer clients send { "refresh_token": "..." }).
 	var rawRefreshToken string
-	if r.Header.Get("Content-Type") == "application/json" {
-		var body struct {
-			RefreshToken string `json:"refresh_token"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err == nil && body.RefreshToken != "" {
-			rawRefreshToken = body.RefreshToken
-		}
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
 	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+		rawRefreshToken = body.RefreshToken
+	}
+	// Fall back to cookie (browser clients and Insomnia cookie jar).
 	if rawRefreshToken == "" {
-		if cookie, err := r.Cookie(cookieRefreshToken); err == nil && cookie.Value != "" {
+		if cookie, err := r.Cookie(cookieRefreshToken); err == nil {
 			rawRefreshToken = cookie.Value
 		}
 	}
@@ -355,15 +361,12 @@ func (h *Handler) PostRefresh(w http.ResponseWriter, r *http.Request) {
 // PostLogout handles POST /api/auth/logout.
 // Revokes the refresh token (from JSON body or cookie). Idempotent — succeeds even if absent or already revoked.
 func (h *Handler) PostLogout(w http.ResponseWriter, r *http.Request) {
-	// Accept refresh_token from JSON body (Electron/Bearer clients) or cookie (browser clients).
 	var rawToken string
-	if r.Header.Get("Content-Type") == "application/json" {
-		var body struct {
-			RefreshToken string `json:"refresh_token"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
-			rawToken = body.RefreshToken
-		}
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+		rawToken = body.RefreshToken
 	}
 	if rawToken == "" {
 		if cookie, err := r.Cookie(cookieRefreshToken); err == nil {
@@ -479,30 +482,37 @@ func (h *Handler) PostResetPassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Password updated successfully. Please log in again."})
 }
 
-// ---- File handlers ----
+// ---- Folder handlers ----
 
-// GetWatchedPath handles GET /api/files/path.
-// Returns the authenticated user's saved watched directory path, or 404 if none set.
-func (h *Handler) GetWatchedPath(w http.ResponseWriter, r *http.Request) {
-	userID := userIDFromContext(r.Context())
-	wp, err := db.GetWatchedPathByUserID(r.Context(), h.db, userID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no watched path set"})
-		} else {
-			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve path"})
-		}
-		return
+// parseFolderID extracts and validates the {folderID} URL param. Returns 0 on error (response already written).
+func parseFolderID(w http.ResponseWriter, r *http.Request) int64 {
+	idStr := chi.URLParam(r, "folderID")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid folder id"})
+		return 0
 	}
-	writeJSON(w, http.StatusOK, WatchedPathResponse{ID: wp.ID, Path: wp.Path, UpdatedAt: wp.UpdatedAt})
+	return id
 }
 
-// PutWatchedPath handles PUT /api/files/path.
-// Creates or replaces the authenticated user's watched directory path.
-func (h *Handler) PutWatchedPath(w http.ResponseWriter, r *http.Request) {
+// GetFolders handles GET /api/folders.
+// Returns all of the authenticated user's watched folders with aggregate stats.
+func (h *Handler) GetFolders(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+	stats, err := db.GetFolderStats(r.Context(), h.db, userID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to load folders"})
+		return
+	}
+	writeJSON(w, http.StatusOK, FolderStatsResponse{Folders: stats})
+}
+
+// PostFolder handles POST /api/folders.
+// Adds a new watched directory for the authenticated user.
+func (h *Handler) PostFolder(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 
-	var req SetWatchedPathRequest
+	var req AddFolderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
 		return
@@ -512,43 +522,82 @@ func (h *Handler) PutWatchedPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wp, pathChanged, err := db.SetWatchedPath(r.Context(), h.db, userID, req.Path)
+	wp, err := db.AddWatchedPath(r.Context(), h.db, userID, req.Path, req.Name)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to save path"})
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to add folder"})
 		return
 	}
-
-	// When the path changes, clean up the stale backed-up content.
-	// Both operations are best-effort — failures are logged but do not affect the response.
-	// MinIO is deleted first so that if it partially fails, the DB records remain as the
-	// source of truth (they'll be overwritten on the next upload of the same relative paths).
-	if pathChanged && h.storage != nil {
-		if cleanErr := h.storage.DeleteUserObjects(r.Context(), userID); cleanErr != nil {
-			log.Printf("warn: failed to delete MinIO objects for user %d on path change: %v", userID, cleanErr)
-		}
-		if cleanErr := db.DeleteFileBackupsByUserID(r.Context(), h.db, userID); cleanErr != nil {
-			log.Printf("warn: failed to delete file_backups for user %d on path change: %v", userID, cleanErr)
-		}
-	}
-
-	writeJSON(w, http.StatusOK, WatchedPathResponse{ID: wp.ID, Path: wp.Path, UpdatedAt: wp.UpdatedAt})
+	writeJSON(w, http.StatusCreated, FolderResponse{ID: wp.ID, Path: wp.Path, Name: wp.Name, CreatedAt: wp.CreatedAt})
 }
 
-// GetFiles handles GET /api/files.
-// Returns the stored file list for the authenticated user's watched path.
-func (h *Handler) GetFiles(w http.ResponseWriter, r *http.Request) {
+// DeleteFolder handles DELETE /api/folders/{folderID}.
+// Removes a watched folder and cleans up all its backed-up objects from storage.
+func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
+	folderID := parseFolderID(w, r)
+	if folderID == 0 {
+		return
+	}
 
-	wp, err := db.GetWatchedPathByUserID(r.Context(), h.db, userID)
+	// Verify ownership and get the record before deleting.
+	_, err := db.GetWatchedPathByID(r.Context(), h.db, folderID, userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no watched path set"})
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "folder not found"})
 		} else {
-			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve path"})
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve folder"})
 		}
 		return
 	}
 
+	// Delete each backup object from object storage before removing DB records.
+	// Best-effort — log failures but continue so the DB record is always removed.
+	if h.storage != nil {
+		backups, err := db.GetFileBackupsByWatchedPathID(r.Context(), h.db, folderID)
+		if err != nil {
+			log.Printf("warn: failed to list backups for folder %d during delete: %v", folderID, err)
+		} else {
+			for _, b := range backups {
+				if delErr := h.storage.DeleteObject(r.Context(), b.ObjectKey); delErr != nil {
+					log.Printf("warn: failed to delete object %q for folder %d: %v", b.ObjectKey, folderID, delErr)
+				}
+			}
+		}
+	}
+
+	if err := db.DeleteWatchedPath(r.Context(), h.db, folderID, userID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to delete folder"})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// requireFolder is a helper used by per-folder handlers: it parses the folderID,
+// verifies ownership, and returns the WatchedPath. Returns nil (response already written) on error.
+func (h *Handler) requireFolder(w http.ResponseWriter, r *http.Request, userID int64) *models.WatchedPath {
+	folderID := parseFolderID(w, r)
+	if folderID == 0 {
+		return nil
+	}
+	wp, err := db.GetWatchedPathByID(r.Context(), h.db, folderID, userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "folder not found"})
+		} else {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve folder"})
+		}
+		return nil
+	}
+	return wp
+}
+
+// GetFiles handles GET /api/folders/{folderID}/files.
+func (h *Handler) GetFiles(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+	wp := h.requireFolder(w, r, userID)
+	if wp == nil {
+		return
+	}
 	files, err := db.GetWatchedFiles(r.Context(), h.db, wp.ID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve files"})
@@ -557,10 +606,13 @@ func (h *Handler) GetFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, WatchedFilesResponse{Files: files})
 }
 
-// PutSyncFiles handles PUT /api/files/sync.
-// Atomically replaces the stored file list for the user's watched path.
+// PutSyncFiles handles PUT /api/folders/{folderID}/sync.
 func (h *Handler) PutSyncFiles(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
+	wp := h.requireFolder(w, r, userID)
+	if wp == nil {
+		return
+	}
 
 	var req SyncWatchedFilesRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -569,12 +621,6 @@ func (h *Handler) PutSyncFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Files == nil {
 		req.Files = []FileEntry{}
-	}
-
-	wp, err := db.GetWatchedPathByUserID(r.Context(), h.db, userID)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no watched path set — call PUT /api/files/path first"})
-		return
 	}
 
 	watchedFiles := make([]models.WatchedFile, len(req.Files))
@@ -597,11 +643,14 @@ func (h *Handler) PutSyncFiles(w http.ResponseWriter, r *http.Request) {
 
 // ---- Backup handlers ----
 
-// GetFileBackups handles GET /api/files/backups.
-// Returns all backup records for the authenticated user.
+// GetFileBackups handles GET /api/folders/{folderID}/backups.
 func (h *Handler) GetFileBackups(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
-	backups, err := db.GetFileBackupsByUserID(r.Context(), h.db, userID)
+	wp := h.requireFolder(w, r, userID)
+	if wp == nil {
+		return
+	}
+	backups, err := db.GetFileBackupsByWatchedPathID(r.Context(), h.db, wp.ID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to load backups"})
 		return
@@ -609,19 +658,15 @@ func (h *Handler) GetFileBackups(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, FileBackupsResponse{Backups: backups})
 }
 
-// PutFileBackup handles PUT /api/files/backup/*.
-// Streams the request body into object storage for the authenticated user.
-// Skips the upload when the provided checksum matches the stored record (file unchanged).
+// PutFileBackup handles PUT /api/folders/{folderID}/backup/*.
+// Streams the request body into object storage. Skips when checksum matches.
 func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
-	userID := userIDFromContext(r.Context())
-
-	// chi wildcard captures everything after /backup/
+	// Validate inputs before any DB access so unit tests with nil DB can cover these checks.
 	relativePath := chi.URLParam(r, "*")
 	if relativePath == "" {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "relative_path is required"})
 		return
 	}
-	// Guard against path traversal regardless of how the client encodes it.
 	if strings.Contains(relativePath, "..") || strings.Contains(filepath.Clean("/"+relativePath), "..") {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid relative_path"})
 		return
@@ -633,8 +678,6 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// X-File-Size carries the byte count. Content-Length is unreliable because
-	// Node.js strips it when piping a stream, even if set explicitly.
 	fileSizeStr := r.Header.Get("X-File-Size")
 	fileSize, fileSizeErr := strconv.ParseInt(fileSizeStr, 10, 64)
 	if fileSizeErr != nil || fileSize < 0 {
@@ -642,8 +685,13 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Skip upload when the file hasn't changed.
-	existing, err := db.GetFileBackup(r.Context(), h.db, userID, relativePath)
+	userID := userIDFromContext(r.Context())
+	wp := h.requireFolder(w, r, userID)
+	if wp == nil {
+		return
+	}
+
+	existing, err := db.GetFileBackup(r.Context(), h.db, wp.ID, relativePath)
 	if err == nil && existing.ChecksumSHA256 == checksum {
 		writeJSON(w, http.StatusOK, UploadFileResponse{
 			RelativePath:   existing.RelativePath,
@@ -656,8 +704,7 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	objectKey := storage.ObjectKey(userID, relativePath)
-	// fileSize may be -1 (unknown); MinIO handles that via streaming multipart upload.
+	objectKey := storage.ObjectKey(userID, wp.ID, relativePath)
 	if err := h.storage.PutObject(r.Context(), objectKey, r.Body, fileSize, "application/octet-stream"); err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "upload failed"})
 		return
@@ -665,6 +712,7 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 
 	backup := &models.FileBackup{
 		UserID:         userID,
+		WatchedPathID:  wp.ID,
 		RelativePath:   relativePath,
 		Size:           fileSize,
 		ChecksumSHA256: checksum,
@@ -685,12 +733,10 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetFileBackup handles GET /api/files/backup/*.
-// Streams the backed-up file bytes from object storage to the client.
+// GetFileBackup handles GET /api/folders/{folderID}/backup/*.
 func (h *Handler) GetFileBackup(w http.ResponseWriter, r *http.Request) {
-	userID := userIDFromContext(r.Context())
+	// Validate path before any DB access so unit tests with nil DB can cover these checks.
 	relativePath := chi.URLParam(r, "*")
-
 	if relativePath == "" {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "relative_path is required"})
 		return
@@ -700,7 +746,13 @@ func (h *Handler) GetFileBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	backup, err := db.GetFileBackup(r.Context(), h.db, userID, relativePath)
+	userID := userIDFromContext(r.Context())
+	wp := h.requireFolder(w, r, userID)
+	if wp == nil {
+		return
+	}
+
+	backup, err := db.GetFileBackup(r.Context(), h.db, wp.ID, relativePath)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "file not backed up"})
