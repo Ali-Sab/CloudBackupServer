@@ -563,9 +563,24 @@ if (typeof module !== 'undefined') {
         icon.textContent = '📄';
 
         const nameEl = document.createElement('span');
-        nameEl.className = 'file-name';
-        nameEl.setAttribute('title', isCloudOnly ? name + ' — cloud only' : name);
+        nameEl.className = 'file-name' + (isCloudOnly ? '' : ' file-link');
+        nameEl.setAttribute('title', isCloudOnly ? name + ' — cloud only' : name + ' — click to open');
         nameEl.innerHTML = truncateName(name, 40);
+        if (!isCloudOnly && entry) {
+          nameEl.setAttribute('role', 'button');
+          nameEl.setAttribute('tabindex', '0');
+          function doOpen() {
+            electronAPI.openFile(currentPath, entry.relativePath).then(function (result) {
+              if (result && result.error) window.UI.toast('Could not open file: ' + result.error, 'error');
+            }).catch(function () {
+              window.UI.toast('Could not open file', 'error');
+            });
+          }
+          nameEl.addEventListener('click', doOpen);
+          nameEl.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doOpen(); }
+          });
+        }
 
         const meta = document.createElement('span');
         meta.className = 'file-meta';

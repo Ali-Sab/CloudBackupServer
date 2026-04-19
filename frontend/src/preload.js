@@ -67,4 +67,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   deleteFile: (rootPath, relativePath) =>
     ipcRenderer.invoke('delete-file', { rootPath, relativePath }),
+
+  /**
+   * Open a file with the OS default application.
+   * @param {string} rootPath
+   * @param {string} relativePath
+   * @returns {Promise<{}|{error: string}>}
+   */
+  openFile: (rootPath, relativePath) =>
+    ipcRenderer.invoke('open-file', { rootPath, relativePath }),
 });
