@@ -6,7 +6,7 @@
  *        or  cd frontend && npm run test:e2e
  *        or  npm run test:e2e:headed  (to watch the app window)
  *
- * Tests T2–T11 skip gracefully when the backend is not running.
+ * Tests T2–T13 skip gracefully when the backend is not running (safeStorage tests also skip if unavailable).
  */
 
 'use strict';
@@ -65,9 +65,9 @@ function makeTempBackupDir() {
 }
 
 /** Launch the Electron app, pointing E2E_SELECT_DIR at tmpDir. */
-function launchApp(tmpDir) {
+function launchApp(tmpDir, { userDataDir } = {}) {
   return electron.launch({
-    args: [MAIN_JS],
+    args: [MAIN_JS, ...(userDataDir ? [`--user-data-dir=${userDataDir}`] : [])],
     env: {
       ...process.env,
       NODE_ENV: 'test',
@@ -347,9 +347,62 @@ test('T10: clicking a file name calls shell.openPath with the correct absolute p
   expect(openedPath.startsWith(tmpDir)).toBe(true);
 });
 
-// ---- T11: Metadata modal -----------------------------------------------------
+// ---- T11: Remember me checkbox appears on login form ------------------------
 
-test('T11: clicking the info button on a file shows the metadata modal', async () => {
+test('T11: remember-me checkbox is visible on the login form in Electron', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  // The checkbox is only shown when safeStorage is available; skip if not.
+  const available = await app.evaluate(({ safeStorage }) => safeStorage.isEncryptionAvailable());
+  test.skip(!available, 'safeStorage not available on this platform');
+
+  await page.waitForSelector('#login-form', { timeout: 10_000 });
+  await expect(page.locator('#remember-me')).toBeVisible();
+});
+
+// ---- T12: Remember me — relaunch auto-logs in --------------------------------
+
+test('T12: logging in with remember-me checked auto-logs in on next launch', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const available = await app.evaluate(({ safeStorage }) => safeStorage.isEncryptionAvailable());
+  test.skip(!available, 'safeStorage not available on this platform');
+
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e2e-userdata-'));
+  try {
+    // Close the default per-test app; we need one pinned to userDataDir.
+    await app.close();
+    app = await launchApp(tmpDir, { userDataDir });
+    page = await app.firstWindow();
+    await page.waitForLoadState('domcontentloaded');
+
+    const { email, password } = await registerFreshUser('rememberme');
+
+    // Login with remember-me checked.
+    await page.waitForSelector('#login-form', { timeout: 10_000 });
+    await page.fill('#email', email);
+    await page.fill('#password', password);
+    await page.check('#remember-me');
+    await page.click('#login-form button[type="submit"]');
+    await page.waitForSelector('#logout-btn', { timeout: 10_000 });
+
+    // Close and relaunch with the same userData — expect auto-login.
+    await app.close();
+    app = await launchApp(tmpDir, { userDataDir });
+    page = await app.firstWindow();
+    await page.waitForLoadState('domcontentloaded');
+
+    // Should land on the dashboard without seeing the login form.
+    await page.waitForSelector('#logout-btn', { timeout: 12_000 });
+    await expect(page.locator('#login-form')).toHaveCount(0);
+  } finally {
+    try { fs.rmSync(userDataDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
+// ---- T13: Metadata modal -----------------------------------------------------
+
+test('T13: clicking the info button on a file shows the metadata modal', async () => {
   test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
 
   const { email, password, token } = await registerFreshUser('meta');

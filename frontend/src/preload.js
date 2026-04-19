@@ -76,4 +76,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   openFile: (rootPath, relativePath) =>
     ipcRenderer.invoke('open-file', { rootPath, relativePath }),
+
+  // ---- Remember me (safeStorage keychain) ----
+
+  /** Returns true if the OS keychain is available for safeStorage. */
+  isSafeStorageAvailable: () => ipcRenderer.invoke('safe-storage-available'),
+
+  /** Encrypt and persist the refresh token to the OS keychain. */
+  saveRefreshToken: (token) => ipcRenderer.invoke('save-refresh-token', token),
+
+  /** Load and decrypt the persisted refresh token, or null if none. */
+  loadRefreshToken: () => ipcRenderer.invoke('load-refresh-token'),
+
+  /** Remove the persisted refresh token. */
+  clearRefreshToken: () => ipcRenderer.invoke('clear-refresh-token'),
 });

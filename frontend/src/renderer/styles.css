@@ -167,6 +167,17 @@ button.link-btn {
 }
 button.link-btn:hover { color: var(--color-primary); }
 
+.remember-me-label {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  color: var(--color-muted);
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
 /* ---- Utility ---- */
 .hidden { display: none !important; }
 
