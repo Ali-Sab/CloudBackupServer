@@ -9,7 +9,7 @@
 global.window = global.window || {};
 window._testMode = true;
 
-const { buildBackupSummary } = require('../src/renderer/files');
+const { buildBackupSummary, formatDate, formatBackupStatusLabel } = require('../src/renderer/files');
 
 describe('buildBackupSummary', () => {
   test('returns null for empty results', () => {
@@ -70,5 +70,33 @@ describe('buildBackupSummary', () => {
     ]);
     expect(result.message).not.toContain('unchanged');
     expect(result.message).not.toContain('failed');
+  });
+});
+
+describe('formatDate', () => {
+  test('returns em-dash for falsy input', () => {
+    expect(formatDate(0)).toBe('—');
+    expect(formatDate(null)).toBe('—');
+    expect(formatDate(undefined)).toBe('—');
+  });
+
+  test('returns a non-empty string for a valid timestamp', () => {
+    const result = formatDate(1_700_000_000_000);
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(0);
+    expect(result).not.toBe('—');
+  });
+});
+
+describe('formatBackupStatusLabel', () => {
+  test.each([
+    ['done',      'Backed up ✓'],
+    ['outdated',  'Changed since last backup'],
+    ['error',     'Backup failed ✗'],
+    ['uploading', 'Uploading…'],
+    [undefined,   'Not yet backed up'],
+    ['',          'Not yet backed up'],
+  ])('status %s → %s', (status, expected) => {
+    expect(formatBackupStatusLabel(status)).toBe(expected);
   });
 });

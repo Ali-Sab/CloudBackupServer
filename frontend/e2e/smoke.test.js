@@ -6,7 +6,7 @@
  *        or  cd frontend && npm run test:e2e
  *        or  npm run test:e2e:headed  (to watch the app window)
  *
- * Tests T2–T7 skip gracefully when the backend is not running.
+ * Tests T2–T10 skip gracefully when the backend is not running.
  */
 
 'use strict';
@@ -78,7 +78,7 @@ function launchApp(tmpDir) {
 
 /**
  * Register a fresh isolated user and return { email, password, token }.
- * Used by tests that need their own clean state independent of the shared test user.
+ * Each test that mutates state uses its own user so tests don't interfere.
  */
 async function registerFreshUser(suffix) {
   const ts  = Date.now();
@@ -134,7 +134,8 @@ test('T1: app launches and renders session status card', async () => {
 test('T2: login with valid credentials shows dashboard', async () => {
   test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
 
-  await loginViaUI(page, process.env.E2E_TEST_EMAIL, process.env.E2E_TEST_PASSWORD);
+  const { email, password } = await registerFreshUser('login');
+  await loginViaUI(page, email, password);
 
   // Dashboard must appear; file browser stays hidden.
   await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
@@ -151,10 +152,11 @@ test('T2: login with valid credentials shows dashboard', async () => {
 test('T3: clicking Add Folder adds a folder card to the dashboard', async () => {
   test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
 
-  await loginViaUI(page, process.env.E2E_TEST_EMAIL, process.env.E2E_TEST_PASSWORD);
+  const { email, password } = await registerFreshUser('addfolder');
+  await loginViaUI(page, email, password);
   await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
 
-  // No folder cards yet for this fresh user (global-setup creates a new user each run).
+
   const cardsBefore = await page.locator('.folder-card').count();
 
   // Click Add Folder — E2E_SELECT_DIR bypasses the OS dialog.
@@ -299,7 +301,8 @@ test('T8: removing a folder removes its card from the dashboard', async () => {
 test('T9: logout clears session and returns to login form', async () => {
   test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
 
-  await loginViaUI(page, process.env.E2E_TEST_EMAIL, process.env.E2E_TEST_PASSWORD);
+  const { email, password } = await registerFreshUser('logout');
+  await loginViaUI(page, email, password);
   await page.waitForSelector('#logout-btn', { timeout: 10_000 });
 
   await page.click('#logout-btn');
@@ -310,4 +313,37 @@ test('T9: logout clears session and returns to login form', async () => {
   await expect(page.locator('#dashboard')).toHaveClass(/hidden/, { timeout: 5_000 });
   await expect(page.locator('#file-browser')).toHaveClass(/hidden/, { timeout: 5_000 });
   await expect(page.locator('#logout-btn')).not.toBeVisible();
+});
+
+// ---- T10: Metadata modal -----------------------------------------------------
+
+test('T10: clicking the info button on a file shows the metadata modal', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password, token } = await registerFreshUser('meta');
+  await httpPost('/api/folders', { path: tmpDir }, token);
+
+  await loginViaUI(page, email, password);
+  await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
+  await page.waitForSelector('.folder-card', { timeout: 8_000 });
+
+  await page.click('.open-folder-btn');
+  await page.waitForSelector('#file-browser:not(.hidden)', { timeout: 8_000 });
+
+  // Wait for real file rows (not the loading/empty placeholder), then force-click the info button.
+  await page.waitForSelector('.file-item:not(.is-dir):not(.file-empty)', { timeout: 8_000 });
+  await page.locator('.file-item:not(.is-dir) .file-info-btn').first().click({ force: true });
+
+  // Modal must appear.
+  await page.waitForSelector('#metadata-modal.modal-visible', { timeout: 5_000 });
+  await expect(page.locator('.modal-title')).toBeVisible();
+  await expect(page.locator('.meta-list')).toBeVisible();
+
+  // First meta-value row must say "File" (the Type row).
+  const typeValue = await page.locator('.meta-value').first().textContent();
+  expect(typeValue.trim()).toBe('File');
+
+  // Escape key must close the modal.
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#metadata-modal')).toHaveCount(0, { timeout: 3_000 });
 });

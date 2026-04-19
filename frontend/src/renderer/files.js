@@ -33,6 +33,35 @@
 // ---- Pure / testable functions ------------------------------------------
 
 /**
+ * Format a millisecond timestamp as a locale-aware date+time string.
+ * Returns '—' for falsy or zero values.
+ * Pure function — no DOM or IPC dependencies.
+ * @param {number} ms
+ * @returns {string}
+ */
+function formatDate(ms) {
+  if (!ms) return '—';
+  return new Date(ms).toLocaleString(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
+
+/**
+ * Human-readable label for a backup status string.
+ * Pure function — no DOM or IPC dependencies.
+ * @param {string|undefined} status
+ * @returns {string}
+ */
+function formatBackupStatusLabel(status) {
+  if (status === 'done')      return 'Backed up ✓';
+  if (status === 'outdated')  return 'Changed since last backup';
+  if (status === 'error')     return 'Backup failed ✗';
+  if (status === 'uploading') return 'Uploading…';
+  return 'Not yet backed up';
+}
+
+/**
  * Compute a backup result summary from an array of per-file upload outcomes.
  * Pure function — no DOM or IPC dependencies.
  *
@@ -59,7 +88,7 @@ function buildBackupSummary(results) {
 // ---- Exports (for Jest) -------------------------------------------------
 
 if (typeof module !== 'undefined') {
-  module.exports = { buildBackupSummary };
+  module.exports = { buildBackupSummary, formatDate, formatBackupStatusLabel };
 }
 
 // ---- Browser / Electron UI ----------------------------------------------
@@ -90,6 +119,10 @@ if (typeof module !== 'undefined') {
   // Keys are relativePath strings; values are the raw backup record objects from the server.
   const cloudOnlyFiles = new Map();
 
+  // Full backup records from the server, keyed by relativePath.
+  // Populated by loadBackupStatuses; used by the metadata modal.
+  const backupRecords = new Map();
+
   // Register the live-watch listener once at module startup.
   electronAPI.onDirectoryChange(function () {
     if (currentPath) refreshDirectory(currentPath, { silent: true, skipUpload: true });
@@ -104,6 +137,7 @@ if (typeof module !== 'undefined') {
     expandedPaths.clear();
     uploadStatus.clear();
     cloudOnlyFiles.clear();
+    backupRecords.clear();
 
     const el = document.getElementById('file-browser');
     el.classList.remove('hidden');
@@ -112,6 +146,10 @@ if (typeof module !== 'undefined') {
 
     try {
       await electronAPI.watchDirectory(folderPath);
+    } catch {
+      // Live watching not supported on this platform — directory still loads below.
+    }
+    try {
       await refreshDirectory(folderPath, { silent: true });
       loadBackupStatuses();
     } catch {
@@ -130,6 +168,8 @@ if (typeof module !== 'undefined') {
     expandedPaths.clear();
     uploadStatus.clear();
     cloudOnlyFiles.clear();
+    backupRecords.clear();
+    closeMetadataModal();
     electronAPI.unwatchDirectory();
   }
 
@@ -142,6 +182,7 @@ if (typeof module !== 'undefined') {
       if (!resp.ok) return;
       const data = await resp.json();
       for (const b of data.backups) {
+        backupRecords.set(b.relative_path, b);
         const result = await electronAPI.checksumFile(currentPath, b.relative_path);
         if (result.error) {
           cloudOnlyFiles.set(b.relative_path, b);
@@ -491,6 +532,12 @@ if (typeof module !== 'undefined') {
         li.appendChild(icon);
         li.appendChild(nameEl);
 
+        if (entry) {
+          const infoBtn = buildInfoButton(entry);
+          infoBtn.style.marginLeft = 'auto';
+          li.appendChild(infoBtn);
+        }
+
         const childUl = document.createElement('ul');
         childUl.className = 'tree-children' + (isOpen ? '' : ' hidden');
         renderTree(childUl, node.children);
@@ -564,11 +611,65 @@ if (typeof module !== 'undefined') {
           slot.setAttribute('tabindex', '-1');
           slot.appendChild(statusEl);
           li.appendChild(slot);
+
+          const archiveBtn = document.createElement('button');
+          archiveBtn.className = 'cloud-archive-btn';
+          archiveBtn.textContent = '☁';
+          archiveBtn.setAttribute('title', 'Archive to cloud and remove local copy');
+          archiveBtn.addEventListener('click', function () { moveToCloudOnly(entry); });
+          li.appendChild(archiveBtn);
         }
+
+        li.appendChild(buildInfoButton(entry));
 
         ul.appendChild(li);
       }
     }
+  }
+
+  // ---- Cloud archive (local → cloud only) ---------------------------------
+
+  async function moveToCloudOnly(entry) {
+    closeMetadataModal();
+
+    // Upload first if not already current.
+    const status = uploadStatus.get(entry.relativePath);
+    if (status !== 'done') {
+      uploadStatus.set(entry.relativePath, 'uploading');
+      renderView();
+
+      const uploadBase = window.APIClient.BASE_URL + '/api/folders/' + currentFolderId + '/backup';
+      const accessToken = window.TokenStore.getAccessToken();
+      const result = await electronAPI.uploadFile(
+        currentPath, entry.relativePath, uploadBase, accessToken
+      );
+
+      if (result.error) {
+        uploadStatus.delete(entry.relativePath);
+        renderView();
+        window.UI.toast('Upload failed: ' + result.error, 'error');
+        return;
+      }
+      uploadStatus.set(entry.relativePath, 'done');
+      renderView();
+    }
+
+    // Delete the local copy.
+    const delResult = await electronAPI.deleteFile(currentPath, entry.relativePath);
+    if (delResult.error) {
+      window.UI.toast('Could not remove local file: ' + delResult.error, 'error');
+      return;
+    }
+
+    // Promote to cloud-only in UI state.
+    const rec = backupRecords.get(entry.relativePath) ||
+      { relative_path: entry.relativePath, size: entry.size };
+    cloudOnlyFiles.set(entry.relativePath, rec);
+    allEntries = allEntries.filter(function (e) { return e.relativePath !== entry.relativePath; });
+    uploadStatus.delete(entry.relativePath);
+    renderView();
+
+    window.UI.toast('Archived to cloud: ' + entry.name, 'success');
   }
 
   // ---- Cloud download -----------------------------------------------------
@@ -597,6 +698,154 @@ if (typeof module !== 'undefined') {
   }
 
   // ---- Helpers ------------------------------------------------------------
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function buildInfoButton(entry) {
+    const btn = document.createElement('button');
+    btn.className = 'file-info-btn';
+    btn.setAttribute('type', 'button');
+    btn.setAttribute('title', 'View details');
+    btn.setAttribute('aria-label', 'View details');
+    btn.textContent = 'ⓘ';
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      openMetadataModal(entry);
+    });
+    return btn;
+  }
+
+  function openMetadataModal(entry) {
+    closeMetadataModal();
+
+    const sep = '/';
+    const absPath = currentPath + sep + entry.relativePath;
+    const parentDir = entry.relativePath.includes('/')
+      ? currentPath + sep + entry.relativePath.split('/').slice(0, -1).join('/')
+      : currentPath;
+
+    const rows = [];
+    rows.push(['Type', entry.isDirectory ? 'Folder' : 'File']);
+    rows.push(['Full path', absPath]);
+    if (!entry.isDirectory) {
+      rows.push(['Size', formatSize(entry.size)]);
+    }
+    if (entry.modified) rows.push(['Modified', formatDate(entry.modified)]);
+    if (entry.created && entry.created > 0) rows.push(['Created', formatDate(entry.created)]);
+
+    if (!entry.isDirectory) {
+      if (entry.isCloudOnly) {
+        rows.push(['Backup', 'Cloud only — not present locally']);
+      } else {
+        rows.push(['Backup', formatBackupStatusLabel(uploadStatus.get(entry.relativePath))]);
+      }
+      const rec = backupRecords.get(entry.relativePath);
+      if (rec) {
+        if (rec.last_backed_up_at) {
+          rows.push(['Last backed up', formatDate(new Date(rec.last_backed_up_at).getTime())]);
+        }
+        if (rec.checksum_sha256) {
+          const h = rec.checksum_sha256;
+          rows.push(['SHA-256', h.slice(0, 8) + '…' + h.slice(-8)]);
+        }
+      }
+    }
+
+    const icon = entry.isDirectory ? '📁' : '📄';
+
+    const overlay = document.createElement('div');
+    overlay.id = 'metadata-modal';
+    overlay.className = 'modal-overlay';
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) closeMetadataModal();
+    });
+
+    const card = document.createElement('div');
+    card.className = 'modal-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+
+    const header = document.createElement('div');
+    header.className = 'modal-header';
+    header.innerHTML = '<span class="modal-title-icon">' + icon + '</span>';
+
+    const titleEl = document.createElement('h3');
+    titleEl.className = 'modal-title';
+    titleEl.textContent = entry.name;
+    header.appendChild(titleEl);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'modal-close';
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', closeMetadataModal);
+    header.appendChild(closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body';
+
+    const list = document.createElement('dl');
+    list.className = 'meta-list';
+    for (const [label, value] of rows) {
+      const dt = document.createElement('dt');
+      dt.className = 'meta-label';
+      dt.textContent = label;
+      const dd = document.createElement('dd');
+      dd.className = 'meta-value';
+      dd.textContent = value;
+      list.appendChild(dt);
+      list.appendChild(dd);
+    }
+    body.appendChild(list);
+
+    card.appendChild(header);
+    card.appendChild(body);
+
+    // Action buttons — only for files, not directories.
+    if (!entry.isDirectory) {
+      const actions = document.createElement('div');
+      actions.className = 'modal-actions';
+
+      if (entry.isCloudOnly) {
+        const dlBtn = document.createElement('button');
+        dlBtn.className = 'modal-action-btn modal-action-download';
+        dlBtn.textContent = '↓  Download to Local';
+        dlBtn.addEventListener('click', function () {
+          closeMetadataModal();
+          downloadCloudFile(entry.relativePath);
+        });
+        actions.appendChild(dlBtn);
+      } else {
+        const archiveBtn = document.createElement('button');
+        archiveBtn.className = 'modal-action-btn modal-action-archive';
+        archiveBtn.textContent = '☁  Move to Cloud Only';
+        archiveBtn.setAttribute('title', 'Upload if needed, then delete the local copy');
+        archiveBtn.addEventListener('click', function () { moveToCloudOnly(entry); });
+        actions.appendChild(archiveBtn);
+      }
+
+      card.appendChild(actions);
+    }
+
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+
+    overlay._keyHandler = function (e) { if (e.key === 'Escape') closeMetadataModal(); };
+    document.addEventListener('keydown', overlay._keyHandler);
+
+    requestAnimationFrame(function () { overlay.classList.add('modal-visible'); });
+  }
+
+  function closeMetadataModal() {
+    const modal = document.getElementById('metadata-modal');
+    if (!modal) return;
+    if (modal._keyHandler) document.removeEventListener('keydown', modal._keyHandler);
+    modal.remove();
+  }
 
   function truncateName(name, max) {
     if (name.length <= max) return escapeHtml(name);

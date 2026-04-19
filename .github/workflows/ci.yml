@@ -146,18 +146,13 @@ jobs:
           PORT: "8080"
         run: |
           ./server &
-          echo $! > server.pid
-          # wait for server to be ready
-          for i in $(seq 1 20); do
-            curl -sf http://localhost:8080/api/health && break
-            sleep 1
-          done
+          for i in $(seq 1 20); do curl -sf http://localhost:8080/api/health && break; sleep 1; done
 
       - name: Register shared E2E test user
         run: |
-          RESP=$(curl -sf -X POST http://localhost:8080/api/auth/register \
+          curl -sf -X POST http://localhost:8080/api/auth/register \
             -H 'Content-Type: application/json' \
-            -d '{"email":"e2e@test.example","password":"E2eTestPass1!"}')
+            -d '{"email":"e2e@test.example","password":"E2eTestPass1!"}' || true
           echo "E2E_TEST_EMAIL=e2e@test.example" >> $GITHUB_ENV
           echo "E2E_TEST_PASSWORD=E2eTestPass1!" >> $GITHUB_ENV
 
@@ -175,11 +170,10 @@ jobs:
           API_BASE_URL: http://localhost:8080
           E2E_TEST_EMAIL: ${{ env.E2E_TEST_EMAIL }}
           E2E_TEST_PASSWORD: ${{ env.E2E_TEST_PASSWORD }}
-          DISPLAY: :99
         run: |
           Xvfb :99 -screen 0 1280x720x24 &
           sleep 1
-          npm run test:e2e
+          DISPLAY=:99 npm run test:e2e
 
       - name: Upload Playwright report
         if: always()

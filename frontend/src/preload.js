@@ -58,4 +58,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   saveFile: (rootPath, relativePath, buffer) =>
     ipcRenderer.invoke('save-file', { rootPath, relativePath, buffer }),
+
+  /**
+   * Delete a file within the watched directory.
+   * @param {string} rootPath
+   * @param {string} relativePath
+   * @returns {Promise<{}|{error: string}>}
+   */
+  deleteFile: (rootPath, relativePath) =>
+    ipcRenderer.invoke('delete-file', { rootPath, relativePath }),
 });
