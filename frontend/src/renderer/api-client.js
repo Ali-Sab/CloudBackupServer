@@ -56,6 +56,19 @@ const TokenStore = {
     if (this._isElectron()) {
       _mem.accessToken = accessToken;
       _mem.refreshToken = refreshToken;
+      // Keep the keychain in sync on token rotation: if a persisted token already
+      // exists (remember-me was opted in), overwrite it with the new one so the
+      // next restart uses a valid token rather than the stale original.
+      if (refreshToken) {
+        const tokenSnapshot = refreshToken;
+        window.electronAPI.loadRefreshToken().then(existing => {
+          // Only write if: (a) remember-me is active (file exists), and
+          // (b) the token hasn't been superseded by a logout or another rotation.
+          if (existing && TokenStore.getRefreshToken() === tokenSnapshot) {
+            return window.electronAPI.saveRefreshToken(tokenSnapshot);
+          }
+        }).catch(() => {});
+      }
       return;
     }
     if (typeof localStorage !== 'undefined') {
@@ -68,6 +81,7 @@ const TokenStore = {
     if (this._isElectron()) {
       _mem.accessToken = null;
       _mem.refreshToken = null;
+      window.electronAPI.clearRefreshToken();
       return;
     }
     if (typeof localStorage !== 'undefined') {
@@ -192,6 +206,17 @@ const APIClient = {
       method: 'PUT',
       body: JSON.stringify(body),
     });
+  },
+
+  /**
+   * Attempt to exchange the current refresh token for a new access token.
+   * Returns true if successful, false if the refresh token is absent or rejected.
+   * Used by checkSession on startup to restore a persisted "remember me" session
+   * before hitting endpoints that return 200/logged_in:false rather than 401.
+   */
+  tryRefresh() {
+    if (!TokenStore.getRefreshToken()) return Promise.resolve(false);
+    return _refreshOnce();
   },
 
   // Internal: raw request with Authorization header injected.

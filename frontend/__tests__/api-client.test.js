@@ -31,7 +31,7 @@ function jsonResponse(status, body) {
   };
 }
 
-// ---- TokenStore ----
+// ---- TokenStore (browser / localStorage path) ----
 
 describe('TokenStore', () => {
   beforeEach(() => {
@@ -55,6 +55,66 @@ describe('TokenStore', () => {
     TokenStore.clear();
     expect(TokenStore.getAccessToken()).toBeNull();
     expect(TokenStore.getRefreshToken()).toBeNull();
+  });
+});
+
+// ---- TokenStore (Electron / in-memory path) ----
+
+describe('TokenStore in Electron mode', () => {
+  let clearRefreshToken, saveRefreshToken, loadRefreshToken;
+
+  beforeEach(() => {
+    clearRefreshToken = jest.fn();
+    saveRefreshToken  = jest.fn().mockResolvedValue({});
+    loadRefreshToken  = jest.fn().mockResolvedValue(null); // no saved token by default
+    window.electronAPI = { clearRefreshToken, saveRefreshToken, loadRefreshToken };
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    // Clear in-memory state while electronAPI is still present so _isElectron() is true
+    // and clear() wipes _mem rather than falling through to localStorage.
+    TokenStore.clear();
+    window.electronAPI = undefined;
+  });
+
+  test('store/get use in-memory slots, not localStorage', () => {
+    TokenStore.store('el-access', 'el-refresh');
+    expect(TokenStore.getAccessToken()).toBe('el-access');
+    expect(TokenStore.getRefreshToken()).toBe('el-refresh');
+    expect(localStorage.getItem('access_token')).toBeNull();
+  });
+
+  test('clear wipes in-memory tokens and calls electronAPI.clearRefreshToken', () => {
+    TokenStore.store('el-access', 'el-refresh');
+    TokenStore.clear();
+    expect(TokenStore.getAccessToken()).toBeNull();
+    expect(TokenStore.getRefreshToken()).toBeNull();
+    expect(clearRefreshToken).toHaveBeenCalledTimes(1);
+  });
+
+  test('store rotates the keychain when a persisted token already exists', async () => {
+    loadRefreshToken.mockResolvedValue('old-persisted-token');
+
+    TokenStore.store('new-access', 'new-refresh');
+
+    // Fire-and-forget: wait for the microtask queue to flush.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(loadRefreshToken).toHaveBeenCalled();
+    expect(saveRefreshToken).toHaveBeenCalledWith('new-refresh');
+  });
+
+  test('store does not write to keychain when no persisted token exists', async () => {
+    // loadRefreshToken already returns null by default in beforeEach.
+    TokenStore.store('new-access', 'new-refresh');
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(loadRefreshToken).toHaveBeenCalled();
+    expect(saveRefreshToken).not.toHaveBeenCalled();
   });
 });
 
@@ -191,6 +251,41 @@ describe('APIClient.request', () => {
 
     await expect(APIClient.request('/api/session')).rejects.toThrow(AuthExpiredError);
     expect(TokenStore.getAccessToken()).toBeNull();
+  });
+});
+
+// ---- APIClient.tryRefresh ----
+
+describe('APIClient.tryRefresh', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    jest.resetAllMocks();
+  });
+
+  test('returns false immediately when no refresh token is stored', async () => {
+    global.fetch = jest.fn();
+    const result = await APIClient.tryRefresh();
+    expect(result).toBe(false);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('returns true and updates TokenStore when refresh succeeds', async () => {
+    TokenStore.store(null, 'saved-refresh-token');
+    global.fetch = jest.fn(async () =>
+      jsonResponse(200, { access_token: 'new-access', refresh_token: 'new-refresh' })
+    );
+    const result = await APIClient.tryRefresh();
+    expect(result).toBe(true);
+    expect(TokenStore.getAccessToken()).toBe('new-access');
+    expect(TokenStore.getRefreshToken()).toBe('new-refresh');
+  });
+
+  test('returns false and clears tokens when refresh is rejected', async () => {
+    TokenStore.store(null, 'expired-refresh-token');
+    global.fetch = jest.fn(async () => jsonResponse(401, { error: 'token expired' }));
+    const result = await APIClient.tryRefresh();
+    expect(result).toBe(false);
+    expect(TokenStore.getRefreshToken()).toBeNull();
   });
 });
 

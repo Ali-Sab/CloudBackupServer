@@ -49,6 +49,23 @@
       el.className = 'card loading';
       el.innerHTML = '<p>Connecting to server…</p>';
 
+      // On Electron, try to restore a persisted refresh token before hitting the server.
+      // We must explicitly refresh here because GET /api/session returns 200 {logged_in:false}
+      // for unauthenticated requests — never 401 — so the auto-refresh in APIClient.request
+      // would never fire on its own.
+      if (TokenStore._isElectron() && !TokenStore.getRefreshToken()) {
+        try {
+          const saved = await window.electronAPI.loadRefreshToken();
+          if (saved) {
+            TokenStore.store(null, saved);
+            const ok = await APIClient.tryRefresh();
+            if (!ok) window.electronAPI.clearRefreshToken();
+          }
+        } catch (e) {
+          console.error('[remember-me] restore failed:', e);
+        }
+      }
+
       try {
         const resp = await API.fetchSession();
         if (!resp.ok) throw new Error(`Server responded with HTTP ${resp.status}`);
@@ -111,6 +128,7 @@
             Password
             <input type="password" id="password" autocomplete="current-password" required />
           </label>
+          <div id="remember-me-slot"></div>
           <div class="form-error" id="form-error">${errorMsg ? escapeHtml(errorMsg) : ''}</div>
           <button type="submit">Sign In</button>
           <button type="button" id="register-btn">Create Account</button>
@@ -120,6 +138,20 @@
       document.getElementById('login-form').addEventListener('submit', handleLogin);
       document.getElementById('register-btn').addEventListener('click', renderRegisterForm.bind(null, el));
       document.getElementById('forgot-btn').addEventListener('click', renderForgotPasswordForm.bind(null, el));
+
+      // Async: inject the remember-me checkbox only when safeStorage is confirmed available.
+      // Runs after the form is already visible so callers need not be async.
+      if (TokenStore._isElectron()) {
+        window.electronAPI.isSafeStorageAvailable().then(function (available) {
+          const slot = document.getElementById('remember-me-slot');
+          if (!available || !slot) return;
+          slot.innerHTML = `
+            <label class="remember-me-label">
+              <input type="checkbox" id="remember-me" />
+              Remember me
+            </label>`;
+        }).catch(() => {});
+      }
     }
 
     async function handleLogin(e) {
@@ -129,6 +161,8 @@
       const errorEl  = document.getElementById('form-error');
       errorEl.textContent = '';
 
+      const rememberMe = document.getElementById('remember-me');
+
       try {
         const resp = await API.login(email, password);
         if (!resp.ok) {
@@ -137,7 +171,13 @@
           errorEl.textContent = msg;
           return;
         }
-        // Auth cookies are set by the server; nothing to store in JS.
+        if (rememberMe && rememberMe.checked) {
+          const refreshToken = TokenStore.getRefreshToken();
+          if (refreshToken) {
+            const result = await window.electronAPI.saveRefreshToken(refreshToken);
+            if (result && result.error) console.error('[remember-me] save failed:', result.error);
+          }
+        }
         checkSession();
       } catch {
         errorEl.textContent = 'Connection error — please try again.';

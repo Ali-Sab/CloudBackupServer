@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -10,6 +10,11 @@ if (process.env.NODE_ENV === 'development') {
     electron: path.join(__dirname, '..', 'node_modules', '.bin', 'electron'),
   });
 }
+
+// Allow the userData path to be overridden via --user-data-dir=<path> (used by E2E tests).
+// Must be called before app.whenReady() so all subsequent getPath('userData') calls see it.
+const _userDataArg = process.argv.find(a => a.startsWith('--user-data-dir='));
+if (_userDataArg) app.setPath('userData', _userDataArg.slice('--user-data-dir='.length));
 
 // Active directory watcher — only one at a time.
 let dirWatcher = null;
@@ -242,6 +247,41 @@ ipcMain.handle('save-file', async (_event, { rootPath, relativePath, buffer }) =
   } catch (e) {
     return { error: e.message };
   }
+});
+
+// ---- IPC: remember-me (safeStorage keychain) ----
+
+// Resolved lazily after app.ready so app.getPath('userData') is safe to call.
+function rememberMePath() {
+  return path.join(app.getPath('userData'), 'remember-me.bin');
+}
+
+ipcMain.handle('safe-storage-available', () => safeStorage.isEncryptionAvailable());
+
+// Encrypts the refresh token with the OS keychain and writes it to disk.
+ipcMain.handle('save-refresh-token', (_event, token) => {
+  try {
+    const encrypted = safeStorage.encryptString(token);
+    fs.writeFileSync(rememberMePath(), encrypted);
+    return {};
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
+// Reads and decrypts the saved refresh token. Returns null if none is stored.
+ipcMain.handle('load-refresh-token', () => {
+  try {
+    const encrypted = fs.readFileSync(rememberMePath());
+    return safeStorage.decryptString(encrypted);
+  } catch {
+    return null;
+  }
+});
+
+// Removes the saved refresh token file.
+ipcMain.handle('clear-refresh-token', () => {
+  try { fs.unlinkSync(rememberMePath()); } catch {}
 });
 
 // ---- App lifecycle ----
