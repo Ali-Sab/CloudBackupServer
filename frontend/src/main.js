@@ -71,6 +71,7 @@ ipcMain.handle('read-directory', (_event, dirPath) => {
         isDirectory: stat.isDirectory(),
         size: stat.size,
         modified: stat.mtimeMs,
+        created: stat.birthtimeMs,
       });
       if (stat.isDirectory()) walk(absPath, relPath);
     }
@@ -82,10 +83,15 @@ ipcMain.handle('read-directory', (_event, dirPath) => {
 // Starts watching dirPath for changes; sends 'directory-changed' to the renderer on each event.
 // Replaces any previously active watcher.
 ipcMain.handle('watch-directory', (_event, dirPath) => {
-  if (dirWatcher) dirWatcher.close();
-  dirWatcher = fs.watch(dirPath, { persistent: false, recursive: true }, (eventType, filename) => {
-    if (win) win.webContents.send('directory-changed', { eventType, filename });
-  });
+  if (dirWatcher) { dirWatcher.close(); dirWatcher = null; }
+  try {
+    dirWatcher = fs.watch(dirPath, { persistent: false, recursive: true }, (eventType, filename) => {
+      if (win) win.webContents.send('directory-changed', { eventType, filename });
+    });
+    dirWatcher.on('error', () => { dirWatcher = null; });
+  } catch {
+    // recursive fs.watch not supported on this platform (Linux < Node 20); live updates disabled
+  }
 });
 
 // Stops the active directory watcher.
@@ -168,6 +174,7 @@ ipcMain.handle('upload-file', async (_event, { rootPath, relativePath, apiBaseUr
       port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
       path: parsedUrl.pathname,
       method: 'PUT',
+      family: 4,
       headers: {
         ...(accessToken ? { 'Authorization': `Bearer ${accessToken}` } : {}),
         'X-Checksum-SHA256': checksum,
@@ -196,6 +203,18 @@ ipcMain.handle('upload-file', async (_event, { rootPath, relativePath, apiBaseUr
     // Stream file bytes into the request body — no buffering.
     fs.createReadStream(absPath).pipe(req);
   });
+});
+
+// Deletes a single file within the watched directory.
+// Returns {} on success or { error: string } on failure.
+ipcMain.handle('delete-file', async (_event, { rootPath, relativePath }) => {
+  const absPath = path.join(rootPath, relativePath.split('/').join(path.sep));
+  try {
+    fs.unlinkSync(absPath);
+    return {};
+  } catch (e) {
+    return { error: e.message };
+  }
 });
 
 // Writes downloaded bytes to a file within the watched directory root.
