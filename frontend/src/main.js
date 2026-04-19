@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -203,6 +203,18 @@ ipcMain.handle('upload-file', async (_event, { rootPath, relativePath, apiBaseUr
     // Stream file bytes into the request body — no buffering.
     fs.createReadStream(absPath).pipe(req);
   });
+});
+
+// Opens a file with the OS default application.
+// Returns {} on success or { error: string } on failure.
+ipcMain.handle('open-file', async (_event, { rootPath, relativePath }) => {
+  const absPath = path.resolve(rootPath, relativePath.split('/').join(path.sep));
+  const rel = path.relative(rootPath, absPath);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    return { error: 'Path is outside the watched directory' };
+  }
+  const err = await shell.openPath(absPath);
+  return err ? { error: err } : {};
 });
 
 // Deletes a single file within the watched directory.

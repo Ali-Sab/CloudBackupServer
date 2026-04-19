@@ -6,7 +6,7 @@
  *        or  cd frontend && npm run test:e2e
  *        or  npm run test:e2e:headed  (to watch the app window)
  *
- * Tests T2–T10 skip gracefully when the backend is not running.
+ * Tests T2–T11 skip gracefully when the backend is not running.
  */
 
 'use strict';
@@ -315,9 +315,41 @@ test('T9: logout clears session and returns to login form', async () => {
   await expect(page.locator('#logout-btn')).not.toBeVisible();
 });
 
-// ---- T10: Metadata modal -----------------------------------------------------
+// ---- T10: clicking a file name opens it with the OS default app -------------
 
-test('T10: clicking the info button on a file shows the metadata modal', async () => {
+test('T10: clicking a file name calls shell.openPath with the correct absolute path', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password, token } = await registerFreshUser('openfile');
+  await httpPost('/api/folders', { path: tmpDir }, token);
+
+  // Spy on shell.openPath in the main process before the click.
+  await app.evaluate(({ shell }) => {
+    global._e2eOpenedPath = null;
+    shell.openPath = async (p) => { global._e2eOpenedPath = p; return ''; };
+  });
+
+  await loginViaUI(page, email, password);
+  await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
+  await page.waitForSelector('.folder-card', { timeout: 8_000 });
+
+  await page.click('.open-folder-btn');
+  await page.waitForSelector('#file-browser:not(.hidden)', { timeout: 8_000 });
+  await page.waitForSelector('.file-item:not(.is-dir):not(.file-empty)', { timeout: 8_000 });
+
+  // Click the first file name link.
+  await page.locator('.file-item:not(.is-dir) .file-link').first().click();
+
+  // Give the IPC round-trip a moment, then assert.
+  await page.waitForTimeout(500);
+  const openedPath = await app.evaluate(() => global._e2eOpenedPath);
+  expect(openedPath).toBeTruthy();
+  expect(openedPath.startsWith(tmpDir)).toBe(true);
+});
+
+// ---- T11: Metadata modal -----------------------------------------------------
+
+test('T11: clicking the info button on a file shows the metadata modal', async () => {
   test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
 
   const { email, password, token } = await registerFreshUser('meta');
