@@ -36,6 +36,8 @@ html, body {
 }
 
 .app-header {
+  display: flex;
+  align-items: center;
   padding: 18px 28px;
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface);
@@ -123,7 +125,29 @@ button {
   font-size: 0.95rem;
   font-weight: 500;
   padding: 10px 18px;
-  transition: background 0.15s, opacity 0.15s;
+  transition: background 0.15s, opacity 0.15s, border-color 0.15s, color 0.15s;
+}
+
+/* #7 — Explicit disabled state */
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+button[type="submit"]:disabled:hover  { background: var(--color-primary); }
+button[type="button"]:disabled:hover  { background: transparent; border-color: var(--color-border); color: var(--color-muted); }
+
+/* #1 — Button loading spinner */
+.btn-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  opacity: 0.8;
+  margin-right: 7px;
+  vertical-align: middle;
 }
 
 button[type="submit"],
@@ -154,6 +178,44 @@ button[type="button"]:hover {
   font-size: 0.88rem;
   min-height: 1.2em;
 }
+
+/* #2 — Field-level error highlight */
+input.input-error {
+  border-color: var(--color-error);
+}
+input.input-error:focus {
+  border-color: var(--color-error);
+}
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20%       { transform: translateX(-5px); }
+  60%       { transform: translateX(5px); }
+}
+.input-shake { animation: shake 0.3s ease; }
+
+/* #3 — Password reveal wrapper */
+.password-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.password-wrapper input {
+  flex: 1;
+  padding-right: 40px;
+}
+.password-toggle {
+  position: absolute;
+  right: 8px;
+  background: none;
+  border: none;
+  padding: 4px;
+  color: var(--color-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.password-toggle:hover { color: var(--color-primary); }
 
 /* ---- Link-style button (forgot password) ---- */
 button.link-btn {
@@ -297,7 +359,22 @@ button.link-btn:hover { color: var(--color-primary); }
 .file-browser .card {
   max-width: 100%;
   padding: 28px 32px;
+  overflow: hidden;
 }
+
+.file-browser-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.file-item-empty-wrap {
+  justify-content: center;
+  padding: 32px 0;
+}
+
+.empty-state--compact { padding: 24px; }
 
 .file-browser-header {
   display: flex;
@@ -428,19 +505,23 @@ button.link-btn:hover { color: var(--color-primary); }
   flex-direction: column;
   gap: 8px;
   z-index: 9999;
-  pointer-events: none;
 }
 
 .toast {
-  padding: 10px 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px 10px 16px;
   border-radius: var(--radius);
   font-size: 0.9rem;
   font-weight: 500;
   opacity: 0;
   transform: translateY(8px);
   transition: opacity 0.2s ease, transform 0.2s ease;
-  max-width: 320px;
+  max-width: 340px;
   word-break: break-word;
+  pointer-events: auto;
+  cursor: default;
 }
 
 .toast-visible {
@@ -448,16 +529,232 @@ button.link-btn:hover { color: var(--color-primary); }
   transform: translateY(0);
 }
 
+/* #5 — Toast icon */
+.toast-icon {
+  flex-shrink: 0;
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.toast-text { flex: 1; }
+
+/* #4 — Toast dismiss button */
+.toast-close {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+.toast-close:hover { opacity: 1; }
+
 .toast-success {
   background: #14532d;
   border: 1px solid #166534;
   color: var(--color-success);
 }
+.toast-success .toast-close { color: var(--color-success); }
 
 .toast-error {
   background: #450a0a;
   border: 1px solid #7f1d1d;
   color: var(--color-error);
+}
+.toast-error .toast-close { color: var(--color-error); }
+
+/* ---- App header user info (#14) ---- */
+.header-user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+.header-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  letter-spacing: 0.03em;
+}
+.header-email {
+  font-size: 0.83rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+.header-signout {
+  font-size: 0.8rem;
+  padding: 5px 12px;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  color: var(--color-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s, color 0.15s;
+}
+.header-signout:hover { border-color: var(--color-error); color: var(--color-error); }
+
+/* ---- Skeleton loading (#13) ---- */
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position:  400px 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, var(--color-border) 25%, #353a52 50%, var(--color-border) 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s infinite linear;
+  border-radius: 4px;
+}
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.skeleton-row:last-child { border-bottom: none; }
+.skeleton-icon  { width: 20px;  height: 20px; flex-shrink: 0; }
+.skeleton-line  { height: 12px; flex: 1; }
+.skeleton-short { height: 12px; width: 60px; }
+.skeleton-right { margin-left: auto; }
+
+/* Folder card skeleton */
+.skeleton-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 18px 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.skeleton-card-icon { width: 36px; height: 36px; border-radius: 6px; }
+.skeleton-card-body { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.skeleton-card-name { height: 14px; width: 40%; }
+.skeleton-card-sub  { height: 11px; width: 65%; }
+
+/* ---- Dashboard summary strip (#15) ---- */
+.summary-stat-value--sm { font-size: 0.95rem; }
+
+.dashboard-summary {
+  display: flex;
+  gap: 0;
+  margin-bottom: 20px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.summary-stat {
+  flex: 1;
+  padding: 14px 20px;
+  border-right: 1px solid var(--color-border);
+  text-align: center;
+}
+.summary-stat:last-child { border-right: none; }
+.summary-stat-value {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--color-text);
+  line-height: 1.2;
+}
+.summary-stat-label {
+  font-size: 0.72rem;
+  color: var(--color-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 2px;
+}
+
+/* ---- Folder card storage bar (#16) ---- */
+.folder-freshness-bar {
+  height: 3px;
+  background: var(--color-border);
+  border-radius: 2px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+.folder-freshness-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+.folder-freshness-fill.health-green  { background: var(--color-success); }
+.folder-freshness-fill.health-amber  { background: #f59e0b; }
+.folder-freshness-fill.health-red    { background: var(--color-error); }
+
+/* ---- Empty state (#17) ---- */
+.empty-state {
+  text-align: center;
+  padding: 48px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.empty-state-icon { font-size: 3rem; line-height: 1; }
+.empty-state-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+}
+.empty-state-body {
+  font-size: 0.9rem;
+  color: var(--color-muted);
+  margin: 0;
+  max-width: 280px;
+}
+.empty-state-btn {
+  margin-top: 8px;
+  background: var(--color-primary);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 20px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.empty-state-btn:hover { background: var(--color-primary-h); }
+
+/* ---- Backup progress bar (visual fill, #12) ---- */
+.backup-progress-track {
+  height: 3px;
+  background: var(--color-border);
+  border-radius: 0 0 var(--radius) var(--radius);
+  overflow: hidden;
+  margin: -28px -32px 20px;
+}
+.backup-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--color-primary);
+  border-radius: inherit;
+  transition: width 0.3s ease, background 0.3s ease;
+}
+.backup-progress-fill.has-errors { background: var(--color-error); }
+.backup-progress-fill.done       { background: var(--color-success); }
+
+/* ---- Outdated file row (#20) ---- */
+.file-item.outdated-file {
+  border-left: 3px solid #f59e0b;
+  padding-left: 6px;
 }
 
 /* ---- Dev-mode notice ---- */
@@ -499,10 +796,21 @@ button.link-btn:hover { color: var(--color-primary); }
   border-radius: var(--radius);
   padding: 18px 24px;
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  transition: border-color 0.15s;
+}
+.folder-card-row {
+  display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  transition: border-color 0.15s;
+}
+.folder-card-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .folder-card:hover { border-color: var(--color-primary); }
 
@@ -526,7 +834,7 @@ button.link-btn:hover { color: var(--color-primary); }
 .folder-card-stats { font-size: 0.8rem; color: var(--color-muted); margin-top: 2px; }
 .folder-card-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
-/* ---- File info button ---- */
+/* ---- File info button (#9 — always visible at low opacity) ---- */
 .file-info-btn {
   flex-shrink: 0;
   background: transparent;
@@ -540,12 +848,50 @@ button.link-btn:hover { color: var(--color-primary); }
   display: flex;
   align-items: center;
   justify-content: center;
-  opacity: 0;
+  opacity: 0.35;
   transition: opacity 0.15s, border-color 0.15s, color 0.15s;
   padding: 0;
 }
-.file-item:hover .file-info-btn { opacity: 0.5; }
+.file-item:hover .file-info-btn { opacity: 0.6; }
 .file-info-btn:hover { opacity: 1 !important; border-color: var(--color-border); color: var(--color-primary); }
+
+/* ---- Folder health dot (#6) ---- */
+.folder-health-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.folder-health-dot.health-green  { background: var(--color-success); }
+.folder-health-dot.health-amber  { background: #f59e0b; }
+.folder-health-dot.health-red    { background: var(--color-error); }
+
+/* ---- Backup progress bar (#8) ---- */
+.backup-progress {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+.backup-progress.in-progress { color: var(--color-primary); }
+.backup-progress.done        { color: var(--color-success); }
+.backup-progress.has-errors  { color: var(--color-error); }
+
+/* ---- Copy-to-clipboard button (#10) ---- */
+.meta-copy-btn {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-muted);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 1px 6px;
+  margin-left: 6px;
+  transition: border-color 0.15s, color 0.15s;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.meta-copy-btn:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.meta-copy-btn.copied { border-color: var(--color-success); color: var(--color-success); }
 
 /* ---- Metadata modal ---- */
 .modal-overlay {
@@ -560,6 +906,7 @@ button.link-btn:hover { color: var(--color-primary); }
   transition: opacity 0.15s ease;
 }
 .modal-overlay.modal-visible { opacity: 1; }
+.modal-overlay--confirm { z-index: 1100; }
 
 .modal-card {
   background: var(--color-surface);
@@ -660,3 +1007,256 @@ button.link-btn:hover { color: var(--color-primary); }
 .modal-action-archive:hover {
   background: rgba(245, 158, 11, 0.12);
 }
+
+/* ---- #23 — Light/dark theme toggle ---- */
+.theme-toggle-btn {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  color: var(--color-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 4px 8px;
+  transition: border-color 0.15s, color 0.15s;
+}
+.theme-toggle-btn:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+/* Light theme overrides */
+html[data-theme="light"] {
+  --color-bg:        #f0f2f5;
+  --color-surface:   #ffffff;
+  --color-border:    #d1d5db;
+  --color-primary:   #2563eb;
+  --color-primary-h: #1d4ed8;
+  --color-text:      #111827;
+  --color-muted:     #6b7280;
+  --color-error:     #dc2626;
+  --color-success:   #059669;
+}
+html[data-theme="light"] .skeleton {
+  background: linear-gradient(90deg, #d1d5db 25%, #e5e7eb 50%, #d1d5db 75%);
+  background-size: 800px 100%;
+}
+html[data-theme="light"] .toast-success {
+  background: #d1fae5;
+  border-color: #6ee7b7;
+  color: #065f46;
+}
+html[data-theme="light"] .toast-success .toast-close { color: #065f46; }
+html[data-theme="light"] .toast-error {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+html[data-theme="light"] .toast-error .toast-close { color: #991b1b; }
+
+/* ---- #21/#22 — Search bar & sort controls in file browser ---- */
+.file-browser-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.file-search-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.file-search-input {
+  width: 100%;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  color: var(--color-text);
+  font-size: 0.88rem;
+  padding: 6px 28px 6px 10px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.file-search-input:focus {
+  border-color: var(--color-primary);
+}
+
+.file-search-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  color: var(--color-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  transition: color 0.15s;
+}
+.file-search-clear:hover { color: var(--color-text); }
+
+.file-sort-select {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  color: var(--color-text);
+  font-size: 0.85rem;
+  padding: 6px 8px;
+  cursor: pointer;
+  outline: none;
+  flex-shrink: 0;
+  transition: border-color 0.15s;
+}
+.file-sort-select:focus { border-color: var(--color-primary); }
+
+.file-sort-dir-btn {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  color: var(--color-muted);
+  cursor: pointer;
+  font-size: 0.82rem;
+  padding: 6px 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  transition: border-color 0.15s, color 0.15s;
+}
+.file-sort-dir-btn:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+/* No-results message in file list */
+.file-search-empty {
+  padding: 24px 0;
+  text-align: center;
+  color: var(--color-muted);
+  font-size: 0.9rem;
+  font-style: italic;
+}
+
+/* ---- #24 — Rename inline edit ---- */
+.folder-rename-input {
+  background: var(--color-bg);
+  border: 1px solid var(--color-primary);
+  border-radius: 5px;
+  color: var(--color-text);
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 2px 6px;
+  outline: none;
+  min-width: 80px;
+  max-width: 220px;
+}
+
+/* ---- #25 — Danger button in confirmation modal ---- */
+.modal-action-danger {
+  background: transparent;
+  color: var(--color-error);
+  border-color: var(--color-error);
+}
+.modal-action-danger:hover {
+  background: rgba(248, 113, 113, 0.12);
+}
+
+/* ---- #26 — Relative time toggle buttons ---- */
+.rel-time-btn {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: inherit;
+  font-weight: inherit;
+  padding: 0;
+  border-radius: 3px;
+  text-decoration: underline dotted;
+  transition: color 0.15s;
+}
+.rel-time-btn:hover { color: var(--color-primary); }
+
+/* ---- #27 — Backup history list in metadata modal ---- */
+.backup-history-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-border);
+}
+.backup-history-heading {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-muted);
+  margin-bottom: 8px;
+}
+.backup-history-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.backup-history-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.82rem;
+  color: var(--color-text);
+  gap: 12px;
+}
+.backup-history-item-date { color: var(--color-muted); }
+.backup-history-empty {
+  font-size: 0.82rem;
+  color: var(--color-muted);
+  font-style: italic;
+}
+
+/* ---- #28 — Error boundary in file browser ---- */
+.file-list-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 40px 24px;
+  text-align: center;
+}
+.file-list-error-icon { font-size: 2rem; }
+.file-list-error-msg {
+  color: var(--color-muted);
+  font-size: 0.9rem;
+}
+
+/* ---- #29 — Skip-file context menu ---- */
+.context-menu {
+  position: fixed;
+  z-index: 2000;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  min-width: 180px;
+  overflow: hidden;
+}
+.context-menu-item {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: 0.88rem;
+  padding: 9px 16px;
+  text-align: left;
+  transition: background 0.1s;
+}
+.context-menu-item:hover { background: var(--color-bg); }
+
+/* Skipped files styling */
+.file-item.skipped-file { opacity: 0.45; }
+.file-item.skipped-file .file-name { text-decoration: line-through; }

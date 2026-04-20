@@ -69,6 +69,14 @@
       return APIClient.request('/api/folders/' + id, { method: 'DELETE' });
     },
 
+    /** Renames a folder. Body: { name }. Returns updated FolderResponse. */
+    renameFolder(id, name) {
+      return APIClient.request('/api/folders/' + id, {
+        method: 'PUT',
+        body: JSON.stringify({ name }),
+      });
+    },
+
     // ---- Per-folder files ----
 
     /** Returns { files: [...] } for the given folder. */

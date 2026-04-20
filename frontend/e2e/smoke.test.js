@@ -284,10 +284,11 @@ test('T8: removing a folder removes its card from the dashboard', async () => {
   await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
   await page.waitForSelector('.folder-card', { timeout: 8_000 });
 
-  // Accept the confirm() dialog that the Remove button triggers.
-  page.on('dialog', dialog => dialog.accept());
-
   await page.click('.remove-folder-btn');
+
+  // Wait for custom confirm modal and confirm removal.
+  await page.waitForSelector('.modal-action-danger', { timeout: 5_000 });
+  await page.click('.modal-action-danger');
 
   // Card must disappear.
   await expect(page.locator('.folder-card')).toHaveCount(0, { timeout: 8_000 });
@@ -398,6 +399,108 @@ test('T12: logging in with remember-me checked auto-logs in on next launch', asy
   } finally {
     try { fs.rmSync(userDataDir, { recursive: true, force: true }); } catch {}
   }
+});
+
+// ---- T14: Bad credentials show field error ----------------------------------
+
+test('T14: bad login credentials show a form error and keep the login form visible', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  await page.waitForSelector('#login-form', { timeout: 10_000 });
+  await page.fill('#email',    'nosuchuser@test.example');
+  await page.fill('#password', 'wrongpassword');
+  await page.click('#login-form button[type="submit"]');
+
+  // Error message must appear.
+  await page.waitForSelector('#form-error:not(:empty)', { timeout: 8_000 });
+  const errorText = await page.locator('#form-error').textContent();
+  expect(errorText.trim().length).toBeGreaterThan(0);
+
+  // Must still be on the login form — no dashboard, no logout button visible.
+  await expect(page.locator('#login-form')).toBeVisible();
+  await expect(page.locator('#logout-btn')).not.toBeVisible();
+  await expect(page.locator('#dashboard')).toHaveClass(/hidden/);
+});
+
+// ---- T15: Keyboard shortcut 'b' triggers backup -----------------------------
+
+test('T15: keyboard shortcut "b" triggers Backup Now in the file browser', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password, token } = await registerFreshUser('kbbackup');
+  await httpPost('/api/folders', { path: tmpDir }, token);
+
+  await loginViaUI(page, email, password);
+  await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
+  await page.waitForSelector('.folder-card', { timeout: 8_000 });
+
+  await page.click('.open-folder-btn');
+  await page.waitForSelector('#file-browser:not(.hidden)', { timeout: 8_000 });
+  await expect(page.locator('#backup-now-btn')).not.toBeDisabled();
+
+  // Press 'b' — must behave identically to clicking Backup Now.
+  await page.keyboard.press('b');
+
+  // A toast with backup results must appear.
+  await page.waitForSelector('.toast-visible', { timeout: 20_000 });
+  const toastText = await page.locator('.toast-visible').first().textContent();
+  expect(toastText).toMatch(/Backup:/);
+
+  // Button must revert to idle state.
+  await expect(page.locator('#backup-now-btn')).toHaveText('Backup Now', { timeout: 8_000 });
+});
+
+// ---- T16: Backup progress counter and fill bar ------------------------------
+
+test('T16: backup progress counter and fill bar reach the done state', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password } = await registerFreshUser('progress');
+  await loginViaUI(page, email, password);
+  await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
+
+  // Add folder via UI (E2E_SELECT_DIR → tmpDir with hello.txt + data.bin).
+  await page.click('#add-folder-btn');
+  await page.waitForSelector('.folder-card', { timeout: 10_000 });
+  await page.click('.open-folder-btn');
+  await page.waitForSelector('#file-browser:not(.hidden)', { timeout: 8_000 });
+
+  await page.click('#backup-now-btn');
+
+  // Wait for the progress counter to reach its done state ("N / N ✓").
+  await page.waitForSelector('.backup-progress.done', { timeout: 20_000 });
+  const counterText = await page.locator('#backup-progress').textContent();
+  expect(counterText).toMatch(/✓/);
+
+  // Fill bar must carry the "done" class (green) at completion.
+  const fillClass = await page.locator('#backup-progress-fill').getAttribute('class');
+  expect(fillClass).toContain('done');
+});
+
+// ---- T17: Dashboard summary strip appears after adding a folder -------------
+
+test('T17: dashboard summary strip is hidden with no folders and visible after adding one', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password } = await registerFreshUser('summary');
+  await loginViaUI(page, email, password);
+  await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
+
+  // Wait for the skeleton to be replaced — an empty account shows the empty-state element.
+  await page.waitForSelector('.folder-list-empty', { timeout: 8_000 });
+
+  // With no folders the summary strip must be hidden.
+  await expect(page.locator('.dashboard-summary')).toHaveClass(/hidden/);
+
+  // Add a folder via UI.
+  await page.click('#add-folder-btn');
+  await page.waitForSelector('.folder-card', { timeout: 10_000 });
+
+  // Summary strip must now be visible and show 1 folder.
+  await expect(page.locator('.dashboard-summary')).not.toHaveClass(/hidden/);
+  await expect(page.locator('.dashboard-summary')).toBeVisible();
+  const folderCount = await page.locator('.summary-stat-value').first().textContent();
+  expect(folderCount.trim()).toBe('1');
 });
 
 // ---- T13: Metadata modal -----------------------------------------------------

@@ -33,6 +33,37 @@
 // ---- Pure / testable functions ------------------------------------------
 
 /**
+ * Map a filename to an emoji icon based on its extension.
+ * Pure function — no DOM or IPC dependencies.
+ * @param {string} filename
+ * @returns {string}
+ */
+function fileTypeIcon(filename) {
+  const ext = (filename.split('.').pop() || '').toLowerCase();
+  const images  = ['jpg','jpeg','png','gif','bmp','webp','svg','ico','tiff','heic','avif','raw'];
+  const video   = ['mp4','mov','avi','mkv','webm','flv','wmv','m4v','3gp'];
+  const audio   = ['mp3','wav','ogg','flac','aac','m4a','wma','opus'];
+  const code    = ['js','ts','jsx','tsx','py','go','rs','java','c','cpp','h','hpp','cs','css',
+                   'html','json','yaml','yml','toml','xml','sh','bash','zsh','rb','php','swift',
+                   'kt','vue','svelte','md','sql','graphql','prisma','proto'];
+  const archive = ['zip','tar','gz','bz2','xz','7z','rar','dmg','iso','pkg','deb','rpm'];
+  const pdf     = ['pdf'];
+  const doc     = ['doc','docx','xls','xlsx','ppt','pptx','odt','ods','odp','rtf','csv','numbers','pages','key'];
+  const font    = ['ttf','otf','woff','woff2','eot'];
+  const data    = ['db','sqlite','sqlite3','parquet','npy','pkl'];
+  if (images.includes(ext))  return '🖼️';
+  if (video.includes(ext))   return '🎬';
+  if (audio.includes(ext))   return '🎵';
+  if (pdf.includes(ext))     return '📕';
+  if (archive.includes(ext)) return '📦';
+  if (code.includes(ext))    return '💻';
+  if (doc.includes(ext))     return '📃';
+  if (font.includes(ext))    return '🔤';
+  if (data.includes(ext))    return '🗄️';
+  return '📄';
+}
+
+/**
  * Format a millisecond timestamp as a locale-aware date+time string.
  * Returns '—' for falsy or zero values.
  * Pure function — no DOM or IPC dependencies.
@@ -85,10 +116,69 @@ function buildBackupSummary(results) {
   return { message: 'Backup: ' + parts.join(', '), type: failed > 0 ? 'error' : 'success' };
 }
 
+/**
+ * #21 — Filter a tree's children to those whose name matches query (case-insensitive).
+ * Folders that contain a matching descendant are included.
+ * Pure function — no DOM or IPC dependencies.
+ *
+ * @param {Object} children  - map of name → { entry, children }
+ * @param {string} query     - search string (empty = return all)
+ * @returns {Object}         - filtered children map (same shape)
+ */
+function filterTree(children, query) {
+  if (!query) return children;
+  const q = query.toLowerCase();
+  const result = {};
+  for (const name of Object.keys(children)) {
+    const node = children[name];
+    const nameMatch = name.toLowerCase().includes(q);
+    const filteredChildren = filterTree(node.children, query);
+    const childMatch = Object.keys(filteredChildren).length > 0;
+    if (nameMatch || childMatch) {
+      result[name] = { entry: node.entry, children: filteredChildren };
+    }
+  }
+  return result;
+}
+
+/**
+ * #22 — Sort a children map's keys according to field and direction.
+ * Directories always sort before files regardless of field.
+ * Pure function — no DOM or IPC dependencies.
+ *
+ * @param {string[]}  keys      - array of names (keys of children)
+ * @param {Object}    children  - map of name → { entry, children }
+ * @param {'name'|'size'|'modified'} field
+ * @param {'asc'|'desc'} dir
+ * @returns {string[]}          - sorted array of keys
+ */
+function sortEntries(keys, children, field, dir) {
+  return keys.slice().sort(function (a, b) {
+    const aIsDir = children[a].entry ? children[a].entry.isDirectory : true;
+    const bIsDir = children[b].entry ? children[b].entry.isDirectory : true;
+    // Dirs always before files
+    if (aIsDir !== bIsDir) return aIsDir ? -1 : 1;
+
+    let cmp = 0;
+    if (field === 'size') {
+      const aSize = (!aIsDir && children[a].entry) ? (children[a].entry.size || 0) : 0;
+      const bSize = (!bIsDir && children[b].entry) ? (children[b].entry.size || 0) : 0;
+      cmp = aSize - bSize;
+    } else if (field === 'modified') {
+      const aMod = (!aIsDir && children[a].entry) ? (children[a].entry.modified || 0) : 0;
+      const bMod = (!bIsDir && children[b].entry) ? (children[b].entry.modified || 0) : 0;
+      cmp = aMod - bMod;
+    } else {
+      cmp = a.localeCompare(b);
+    }
+    return dir === 'desc' ? -cmp : cmp;
+  });
+}
+
 // ---- Exports (for Jest) -------------------------------------------------
 
 if (typeof module !== 'undefined') {
-  module.exports = { buildBackupSummary, formatDate, formatBackupStatusLabel };
+  module.exports = { buildBackupSummary, formatDate, formatBackupStatusLabel, fileTypeIcon, filterTree, sortEntries };
 }
 
 // ---- Browser / Electron UI ----------------------------------------------
@@ -101,6 +191,15 @@ if (typeof module !== 'undefined') {
 
   let currentFolderId = null;
   let currentPath = null;
+  let _keyHandler = null;
+
+  // #21/#22 — Search and sort state
+  let _searchQuery = '';
+  let _sortField = 'name';   // 'name' | 'size' | 'modified'
+  let _sortDir   = 'asc';    // 'asc'  | 'desc'
+
+  // #29 — Per-session skipped files (by relativePath). Resets on folder open.
+  const skippedFiles = new Set();
 
   // Full flat entry list from the most recent disk read.
   let allEntries = [];
@@ -138,11 +237,31 @@ if (typeof module !== 'undefined') {
     uploadStatus.clear();
     cloudOnlyFiles.clear();
     backupRecords.clear();
+    skippedFiles.clear();
+    _searchQuery = '';
+    _sortField = 'name';
+    _sortDir = 'asc';
 
     const el = document.getElementById('file-browser');
     el.classList.remove('hidden');
     renderScaffold(el);
     setBackupButtonEnabled(true);
+
+    _keyHandler = function (e) {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.key === 'b' || e.key === 'B') {
+        e.preventDefault();
+        const btn = document.getElementById('backup-now-btn');
+        if (btn && !btn.disabled) btn.click();
+      }
+      // #21/#30 — '/' focuses search box
+      if (e.key === '/') {
+        e.preventDefault();
+        const searchInput = document.getElementById('file-search-input');
+        if (searchInput) searchInput.focus();
+      }
+    };
+    document.addEventListener('keydown', _keyHandler);
 
     try {
       await electronAPI.watchDirectory(folderPath);
@@ -158,6 +277,10 @@ if (typeof module !== 'undefined') {
   }
 
   function hide() {
+    if (_keyHandler) {
+      document.removeEventListener('keydown', _keyHandler);
+      _keyHandler = null;
+    }
     const el = document.getElementById('file-browser');
     el.classList.add('hidden');
     el.innerHTML = '';
@@ -169,6 +292,10 @@ if (typeof module !== 'undefined') {
     uploadStatus.clear();
     cloudOnlyFiles.clear();
     backupRecords.clear();
+    skippedFiles.clear();
+    _searchQuery = '';
+    _sortField = 'name';
+    _sortDir = 'asc';
     closeMetadataModal();
     electronAPI.unwatchDirectory();
   }
@@ -194,8 +321,10 @@ if (typeof module !== 'undefined') {
         }
         renderView();
       }
-    } catch {
-      // Non-critical — status icons just won't show for existing backups.
+    } catch (err) {
+      // #28 — Improved UI feedback for backup status load failure
+      console.warn('[Files] loadBackupStatuses failed:', err);
+      window.UI.toast('Could not load backup status', 'error');
     }
   }
 
@@ -205,25 +334,100 @@ if (typeof module !== 'undefined') {
     el.className = 'file-browser';
     el.innerHTML = `
       <div class="card">
+        <div class="backup-progress-track"><div id="backup-progress-fill" class="backup-progress-fill"></div></div>
         <div class="file-browser-header">
           <div id="breadcrumb" class="breadcrumb-area">
             <h2>Local Folder</h2>
           </div>
           <div class="file-browser-actions">
-            <button id="backup-now-btn" disabled>Backup Now</button>
+            <span id="backup-progress" class="backup-progress" aria-live="polite"></span>
+            <button id="backup-now-btn" disabled title="Backup now (B)">Backup Now</button>
             <button id="all-folders-btn">← All Folders</button>
           </div>
         </div>
-        <ul id="file-list" class="file-list">
-          <li class="file-item file-empty">Loading…</li>
-        </ul>
+        <div class="file-browser-controls">
+          <div class="file-search-wrap">
+            <input
+              id="file-search-input"
+              class="file-search-input"
+              type="search"
+              placeholder="Search files… (/)"
+              autocomplete="off"
+              aria-label="Filter files"
+            />
+            <button id="file-search-clear" class="file-search-clear hidden" type="button" aria-label="Clear search">×</button>
+          </div>
+          <select id="file-sort-select" class="file-sort-select" aria-label="Sort by">
+            <option value="name">Name</option>
+            <option value="size">Size</option>
+            <option value="modified">Modified</option>
+          </select>
+          <button id="file-sort-dir-btn" class="file-sort-dir-btn" type="button" title="Toggle sort direction">↑ Asc</button>
+        </div>
+        <ul id="file-list" class="file-list"></ul>
       </div>
     `;
+    document.getElementById('file-list').appendChild(buildSkeletonRows(6));
     document.getElementById('all-folders-btn').addEventListener('click', function () {
       hide();
       window.Dashboard.show();
     });
     document.getElementById('backup-now-btn').addEventListener('click', backupNow);
+
+    // #21 — Search input handler
+    const searchInput = document.getElementById('file-search-input');
+    const clearBtn    = document.getElementById('file-search-clear');
+    searchInput.addEventListener('input', function () {
+      _searchQuery = searchInput.value;
+      clearBtn.classList.toggle('hidden', !_searchQuery);
+      renderView();
+    });
+    clearBtn.addEventListener('click', function () {
+      searchInput.value = '';
+      _searchQuery = '';
+      clearBtn.classList.add('hidden');
+      searchInput.focus();
+      renderView();
+    });
+
+    // #22 — Sort controls
+    const sortSelect = document.getElementById('file-sort-select');
+    const sortDirBtn = document.getElementById('file-sort-dir-btn');
+    sortSelect.value = _sortField;
+    sortDirBtn.textContent = _sortDir === 'asc' ? '↑ Asc' : '↓ Desc';
+    sortSelect.addEventListener('change', function () {
+      _sortField = sortSelect.value;
+      renderView();
+    });
+    sortDirBtn.addEventListener('click', function () {
+      _sortDir = _sortDir === 'asc' ? 'desc' : 'asc';
+      sortDirBtn.textContent = _sortDir === 'asc' ? '↑ Asc' : '↓ Desc';
+      renderView();
+    });
+  }
+
+  function buildSkeletonRows(count) {
+    const widths = [55, 70, 45, 80, 60, 50];
+    const rows = [];
+    for (let i = 0; i < count; i++) {
+      rows.push({ w: widths[i % widths.length] });
+    }
+
+    const ul = document.createDocumentFragment();
+    for (const { w } of rows) {
+      const li = document.createElement('li');
+      li.className = 'skeleton-row';
+      const icon = document.createElement('span');
+      icon.className = 'skeleton skeleton-icon';
+      const line = document.createElement('span');
+      line.className = 'skeleton skeleton-line';
+      line.style.maxWidth = w + '%';
+      const short = document.createElement('span');
+      short.className = 'skeleton skeleton-short skeleton-right';
+      li.appendChild(icon); li.appendChild(line); li.appendChild(short);
+      ul.appendChild(li);
+    }
+    return ul;
   }
 
   function setBackupButtonEnabled(enabled) {
@@ -313,8 +517,51 @@ if (typeof module !== 'undefined') {
     const uploadBase = window.APIClient.BASE_URL + '/api/folders/' + currentFolderId + '/backup';
     const accessToken = window.TokenStore.getAccessToken();
     const results = [];
+    const total = fileEntries.length;
+    let done = 0;
+    let failed = 0;
+
+    function updateProgress() {
+      const textEl = document.getElementById('backup-progress');
+      const fillEl = document.getElementById('backup-progress-fill');
+      const pct    = total > 0 ? Math.round((done / total) * 100) : 0;
+
+      if (fillEl) {
+        fillEl.style.width = pct + '%';
+        fillEl.className = 'backup-progress-fill' +
+          (done === total && failed > 0 ? ' has-errors' : done === total ? ' done' : '');
+      }
+
+      if (!textEl) return;
+      if (done < total) {
+        textEl.className = 'backup-progress in-progress';
+        textEl.textContent = done + ' / ' + total + ' files';
+      } else if (failed > 0) {
+        textEl.className = 'backup-progress has-errors';
+        textEl.textContent = done + ' / ' + total + ' — ' + failed + ' failed';
+      } else {
+        textEl.className = 'backup-progress done';
+        textEl.textContent = total + ' / ' + total + ' ✓';
+        setTimeout(function () {
+          const t = document.getElementById('backup-progress');
+          const f = document.getElementById('backup-progress-fill');
+          if (t) { t.textContent = ''; t.className = 'backup-progress'; }
+          if (f) { f.style.width = '0%'; f.className = 'backup-progress-fill'; }
+        }, 4000);
+      }
+    }
+
+    updateProgress();
 
     for (const entry of fileEntries) {
+      // #29 — Skip files the user has excluded
+      if (skippedFiles.has(entry.relativePath)) {
+        results.push({ error: null, skipped: true });
+        done++;
+        updateProgress();
+        continue;
+      }
+
       uploadStatus.set(entry.relativePath, 'uploading');
       renderView();
 
@@ -335,9 +582,11 @@ if (typeof module !== 'undefined') {
       }
 
       uploadStatus.set(entry.relativePath, result.error ? 'error' : 'done');
-      renderView();
-
       results.push({ error: result.error || null, skipped: !!result.skipped });
+      if (result.error) failed++;
+      done++;
+      updateProgress();
+      renderView();
     }
 
     const summary = buildBackupSummary(results);
@@ -352,6 +601,36 @@ if (typeof module !== 'undefined') {
     const listEl = document.getElementById('file-list');
     if (!listEl) return;
 
+    // #28 — Error boundary
+    try {
+      _renderViewContent(listEl);
+    } catch (err) {
+      console.error('[Files] renderView error:', err);
+      listEl.innerHTML = '';
+      const errorLi = document.createElement('li');
+      errorLi.className = 'file-item file-empty';
+      const errorDiv = document.createElement('div');
+      errorDiv.className = 'file-list-error';
+      const icon = document.createElement('div');
+      icon.className = 'file-list-error-icon';
+      icon.textContent = '⚠️';
+      const msg = document.createElement('div');
+      msg.className = 'file-list-error-msg';
+      msg.textContent = 'Something went wrong rendering the file list';
+      const retryBtn = document.createElement('button');
+      retryBtn.textContent = 'Retry';
+      retryBtn.addEventListener('click', function () {
+        if (currentPath) refreshDirectory(currentPath, { silent: true });
+      });
+      errorDiv.appendChild(icon);
+      errorDiv.appendChild(msg);
+      errorDiv.appendChild(retryBtn);
+      errorLi.appendChild(errorDiv);
+      listEl.appendChild(errorLi);
+    }
+  }
+
+  function _renderViewContent(listEl) {
     const combined = allEntries.slice();
     for (const [relPath, b] of cloudOnlyFiles) {
       if (!combined.some(function (e) { return e.relativePath === relPath; })) {
@@ -368,18 +647,43 @@ if (typeof module !== 'undefined') {
     }
 
     if (combined.length === 0) {
-      listEl.innerHTML = '<li class="file-item file-empty">Folder is empty</li>';
+      listEl.innerHTML = `
+        <li class="file-item file-empty file-item-empty-wrap">
+          <div class="empty-state empty-state--compact">
+            <div class="empty-state-icon">📂</div>
+            <h3 class="empty-state-title">Empty folder</h3>
+            <p class="empty-state-body">No files here yet.</p>
+          </div>
+        </li>`;
       return;
     }
 
     const tree = buildTree(combined);
     const viewNode = resolveViewNode(tree);
 
+    // #21 — Apply search filter
+    const filteredChildren = filterTree(viewNode.children, _searchQuery);
+
     listEl.innerHTML = '';
     if (Object.keys(viewNode.children).length === 0) {
-      listEl.innerHTML = '<li class="file-item file-empty">Folder is empty</li>';
+      const li = document.createElement('li');
+      li.className = 'file-item file-empty file-item-empty-wrap';
+      const wrap = document.createElement('div');
+      wrap.className = 'empty-state empty-state--compact';
+      wrap.innerHTML = '<div class="empty-state-icon">📂</div><h3 class="empty-state-title">Empty folder</h3><p class="empty-state-body">No files here yet.</p>';
+      li.appendChild(wrap);
+      listEl.appendChild(li);
+    } else if (_searchQuery && Object.keys(filteredChildren).length === 0) {
+      // Search with no results
+      const li = document.createElement('li');
+      li.className = 'file-item file-empty';
+      const msg = document.createElement('span');
+      msg.className = 'file-search-empty';
+      msg.textContent = 'No files match "' + _searchQuery + '"';
+      li.appendChild(msg);
+      listEl.appendChild(li);
     } else {
-      renderTree(listEl, viewNode.children);
+      renderTree(listEl, filteredChildren);
     }
   }
 
@@ -492,12 +796,8 @@ if (typeof module !== 'undefined') {
   // ---- Tree rendering -----------------------------------------------------
 
   function renderTree(ul, children) {
-    const keys = Object.keys(children).sort(function (a, b) {
-      const aIsDir = children[a].entry ? children[a].entry.isDirectory : true;
-      const bIsDir = children[b].entry ? children[b].entry.isDirectory : true;
-      if (aIsDir !== bIsDir) return aIsDir ? -1 : 1;
-      return a.localeCompare(b);
-    });
+    // #22 — sort using pure sortEntries function
+    const keys = sortEntries(Object.keys(children), children, _sortField, _sortDir);
 
     for (const name of keys) {
       const node = children[name];
@@ -505,8 +805,13 @@ if (typeof module !== 'undefined') {
       const isDir = entry ? entry.isDirectory : Object.keys(node.children).length > 0;
       const relPath = entry ? entry.relativePath : name;
 
+      const status = uploadStatus.get(relPath);
+      const isSkipped = !isDir && skippedFiles.has(relPath);
       const li = document.createElement('li');
-      li.className = 'file-item' + (isDir ? ' is-dir' : '');
+      li.className = 'file-item' +
+        (isDir ? ' is-dir' : '') +
+        (!isDir && status === 'outdated' ? ' outdated-file' : '') +
+        (isSkipped ? ' skipped-file' : '');
 
       if (isDir) {
         const isOpen = expandedPaths.has(relPath);
@@ -560,7 +865,7 @@ if (typeof module !== 'undefined') {
 
         const icon = document.createElement('span');
         icon.className = 'file-icon';
-        icon.textContent = '📄';
+        icon.textContent = fileTypeIcon(name);
 
         const nameEl = document.createElement('span');
         nameEl.className = 'file-name' + (isCloudOnly ? '' : ' file-link');
@@ -598,7 +903,6 @@ if (typeof module !== 'undefined') {
           dlBtn.addEventListener('click', function () { downloadCloudFile(relPath); });
           li.appendChild(dlBtn);
         } else {
-          const status = uploadStatus.get(relPath);
           const statusEl = document.createElement('span');
           if (status === 'uploading') {
             statusEl.className = 'backup-status uploading';
@@ -637,9 +941,72 @@ if (typeof module !== 'undefined') {
 
         li.appendChild(buildInfoButton(entry));
 
+        // #29 — Right-click context menu for skip toggle (non-cloud-only files only)
+        if (!isCloudOnly && entry) {
+          li.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            showFileContextMenu(e.clientX, e.clientY, entry, li);
+          });
+        }
+
         ul.appendChild(li);
       }
     }
+  }
+
+  // ---- #29 — Context menu -------------------------------------------------
+
+  function showFileContextMenu(x, y, entry, li) {
+    // Remove any existing context menu
+    const existing = document.getElementById('file-context-menu');
+    if (existing) existing.remove();
+
+    const isSkipped = skippedFiles.has(entry.relativePath);
+    const menu = document.createElement('div');
+    menu.id = 'file-context-menu';
+    menu.className = 'context-menu';
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+
+    function closeMenu() {
+      menu.remove();
+      document.removeEventListener('mousedown', dismiss, true);
+      document.removeEventListener('keydown', dismissKey, true);
+    }
+
+    const item = document.createElement('button');
+    item.className = 'context-menu-item';
+    item.textContent = isSkipped ? 'Include in backups' : 'Skip this file in backups';
+    item.addEventListener('click', function () {
+      closeMenu();
+      if (isSkipped) {
+        skippedFiles.delete(entry.relativePath);
+      } else {
+        skippedFiles.add(entry.relativePath);
+      }
+      li.classList.toggle('skipped-file', !isSkipped);
+    });
+
+    menu.appendChild(item);
+    document.body.appendChild(menu);
+
+    // Position correction if off-screen
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) {
+      menu.style.left = (x - rect.width) + 'px';
+    }
+    if (rect.bottom > window.innerHeight) {
+      menu.style.top = (y - rect.height) + 'px';
+    }
+
+    function dismiss(e) {
+      if (!menu.contains(e.target)) closeMenu();
+    }
+    function dismissKey(e) {
+      if (e.key === 'Escape') closeMenu();
+    }
+    document.addEventListener('mousedown', dismiss, true);
+    document.addEventListener('keydown', dismissKey, true);
   }
 
   // ---- Cloud archive (local → cloud only) ---------------------------------
@@ -752,6 +1119,9 @@ if (typeof module !== 'undefined') {
     if (entry.modified) rows.push(['Modified', formatDate(entry.modified)]);
     if (entry.created && entry.created > 0) rows.push(['Created', formatDate(entry.created)]);
 
+    // Full (untruncated) values for copy-to-clipboard. Keyed by label.
+    const copyValues = { 'Full path': absPath };
+
     if (!entry.isDirectory) {
       if (entry.isCloudOnly) {
         rows.push(['Backup', 'Cloud only — not present locally']);
@@ -766,6 +1136,7 @@ if (typeof module !== 'undefined') {
         if (rec.checksum_sha256) {
           const h = rec.checksum_sha256;
           rows.push(['SHA-256', h.slice(0, 8) + '…' + h.slice(-8)]);
+          copyValues['SHA-256'] = h;
         }
       }
     }
@@ -803,6 +1174,8 @@ if (typeof module !== 'undefined') {
     const body = document.createElement('div');
     body.className = 'modal-body';
 
+    const copyableLabels = new Set(['Full path', 'SHA-256']);
+
     const list = document.createElement('dl');
     list.className = 'meta-list';
     for (const [label, value] of rows) {
@@ -812,10 +1185,72 @@ if (typeof module !== 'undefined') {
       const dd = document.createElement('dd');
       dd.className = 'meta-value';
       dd.textContent = value;
+      if (copyableLabels.has(label) && navigator.clipboard) {
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'meta-copy-btn';
+        copyBtn.textContent = 'Copy';
+        copyBtn.setAttribute('aria-label', 'Copy ' + label);
+        const valueToCopy = copyValues[label] || value;
+        copyBtn.addEventListener('click', function () {
+          navigator.clipboard.writeText(valueToCopy).then(function () {
+            copyBtn.textContent = 'Copied!';
+            copyBtn.classList.add('copied');
+            setTimeout(function () {
+              copyBtn.textContent = 'Copy';
+              copyBtn.classList.remove('copied');
+            }, 2000);
+          }).catch(function () {});
+        });
+        dd.appendChild(copyBtn);
+      }
       list.appendChild(dt);
       list.appendChild(dd);
     }
     body.appendChild(list);
+
+    // #27 — Backup history section (files only, uses already-loaded backupRecords)
+    if (!entry.isDirectory) {
+      const histSection = document.createElement('div');
+      histSection.className = 'backup-history-section';
+
+      const histHeading = document.createElement('div');
+      histHeading.className = 'backup-history-heading';
+      histHeading.textContent = 'Backup history';
+      histSection.appendChild(histHeading);
+
+      // backupRecords is keyed by relativePath — collect all versions for this file
+      // The current API stores one record per file. If there are multiple versions
+      // (e.g. from repeated backups), they would be separate entries. Here we
+      // collect the single record for this path from the already-loaded map.
+      const rec = backupRecords.get(entry.relativePath);
+      const histEntries = rec ? [rec] : [];
+
+      if (histEntries.length === 0) {
+        const emptyEl = document.createElement('div');
+        emptyEl.className = 'backup-history-empty';
+        emptyEl.textContent = 'No backup history';
+        histSection.appendChild(emptyEl);
+      } else {
+        const ul = document.createElement('ul');
+        ul.className = 'backup-history-list';
+        for (const h of histEntries) {
+          const li = document.createElement('li');
+          li.className = 'backup-history-item';
+          const dateEl = document.createElement('span');
+          dateEl.className = 'backup-history-item-date';
+          dateEl.textContent = h.last_backed_up_at
+            ? formatDate(new Date(h.last_backed_up_at).getTime())
+            : '—';
+          const sizeEl = document.createElement('span');
+          sizeEl.textContent = formatSize(h.size || 0);
+          li.appendChild(dateEl);
+          li.appendChild(sizeEl);
+          ul.appendChild(li);
+        }
+        histSection.appendChild(ul);
+      }
+      body.appendChild(histSection);
+    }
 
     card.appendChild(header);
     card.appendChild(body);
@@ -849,8 +1284,25 @@ if (typeof module !== 'undefined') {
     overlay.appendChild(card);
     document.body.appendChild(overlay);
 
-    overlay._keyHandler = function (e) { if (e.key === 'Escape') closeMetadataModal(); };
+    overlay._keyHandler = function (e) {
+      if (e.key === 'Escape') { closeMetadataModal(); return; }
+      if (e.key === 'Tab') {
+        const focusable = Array.from(card.querySelectorAll(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        )).filter(function (el) { return !el.disabled; });
+        if (focusable.length === 0) { e.preventDefault(); return; }
+        const first = focusable[0];
+        const last  = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault(); last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault(); first.focus();
+        }
+      }
+    };
     document.addEventListener('keydown', overlay._keyHandler);
+    // Move focus into the modal
+    requestAnimationFrame(function () { closeBtn.focus(); });
 
     requestAnimationFrame(function () { overlay.classList.add('modal-visible'); });
   }

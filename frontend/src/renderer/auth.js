@@ -97,19 +97,42 @@
 
     function renderState(el, state) {
       if (state.type === 'logged-in') {
-        el.className = 'card logged-in';
-        el.innerHTML = `
-          <h2>Welcome back</h2>
-          <p>Signed in as <strong>${escapeHtml(state.email)}</strong></p>
-          <button id="logout-btn">Sign Out</button>
-        `;
-        document.getElementById('logout-btn').addEventListener('click', logout);
+        el.className = 'card hidden';
+        renderHeaderUser(state.email);
         window.Dashboard.show();
       } else {
+        clearHeaderUser();
         window.Dashboard.hide();
         window.Files.hide();
+        el.classList.remove('hidden');
         renderLoginForm(el);
       }
+    }
+
+    function renderHeaderUser(email) {
+      const initials = email
+        .split('@')[0]
+        .replace(/[^a-zA-Z0-9]/g, ' ')
+        .trim()
+        .split(/\s+/)
+        .slice(0, 2)
+        .map(function (w) { return w[0] || ''; })
+        .join('')
+        .toUpperCase() || '?';
+
+      const avatar = document.getElementById('header-avatar');
+      if (avatar) { avatar.textContent = initials; avatar.setAttribute('title', email); }
+
+      const emailEl = document.getElementById('header-email');
+      if (emailEl) emailEl.textContent = email;
+
+      const slot = document.getElementById('header-user');
+      if (slot) slot.classList.remove('hidden');
+    }
+
+    function clearHeaderUser() {
+      const slot = document.getElementById('header-user');
+      if (slot) slot.classList.add('hidden');
     }
 
     // -- Login form ----------------------------------------------------------
@@ -126,11 +149,14 @@
           </label>
           <label>
             Password
-            <input type="password" id="password" autocomplete="current-password" required />
+            <div class="password-wrapper">
+              <input type="password" id="password" autocomplete="current-password" required />
+              <button type="button" class="password-toggle" aria-label="Show password" data-target="password">👁</button>
+            </div>
           </label>
           <div id="remember-me-slot"></div>
           <div class="form-error" id="form-error">${errorMsg ? escapeHtml(errorMsg) : ''}</div>
-          <button type="submit">Sign In</button>
+          <button type="submit" id="login-submit-btn">Sign In</button>
           <button type="button" id="register-btn">Create Account</button>
           <button type="button" id="forgot-btn" class="link-btn">Forgot password?</button>
         </form>
@@ -138,6 +164,7 @@
       document.getElementById('login-form').addEventListener('submit', handleLogin);
       document.getElementById('register-btn').addEventListener('click', renderRegisterForm.bind(null, el));
       document.getElementById('forgot-btn').addEventListener('click', renderForgotPasswordForm.bind(null, el));
+      el.querySelectorAll('.password-toggle').forEach(attachPasswordToggle);
 
       // Async: inject the remember-me checkbox only when safeStorage is confirmed available.
       // Runs after the form is already visible so callers need not be async.
@@ -156,19 +183,26 @@
 
     async function handleLogin(e) {
       e.preventDefault();
-      const email    = document.getElementById('email').value.trim();
-      const password = document.getElementById('password').value;
-      const errorEl  = document.getElementById('form-error');
+      const emailInput = document.getElementById('email');
+      const passInput  = document.getElementById('password');
+      const email      = emailInput.value.trim();
+      const password   = passInput.value;
+      const errorEl    = document.getElementById('form-error');
+      const submitBtn  = document.getElementById('login-submit-btn');
       errorEl.textContent = '';
+      clearFieldErrors([emailInput, passInput]);
 
       const rememberMe = document.getElementById('remember-me');
 
+      setButtonLoading(submitBtn, true, 'Signing in…');
       try {
         const resp = await API.login(email, password);
         if (!resp.ok) {
           let msg = 'Login failed';
           try { msg = (await resp.json()).error || msg; } catch {}
           errorEl.textContent = msg;
+          markFieldError(password ? passInput : emailInput);
+          setButtonLoading(submitBtn, false, 'Sign In');
           return;
         }
         if (rememberMe && rememberMe.checked) {
@@ -181,6 +215,7 @@
         checkSession();
       } catch {
         errorEl.textContent = 'Connection error — please try again.';
+        setButtonLoading(submitBtn, false, 'Sign In');
       }
     }
 
@@ -191,36 +226,54 @@
       el.innerHTML = `
         <h2>Create Account</h2>
         <form id="register-form">
-          <label>Email    <input type="email" id="reg-email" required /></label>
-          <label>Password <input type="password" id="reg-password" required /></label>
+          <label>
+            Email
+            <input type="email" id="reg-email" required />
+          </label>
+          <label>
+            Password
+            <div class="password-wrapper">
+              <input type="password" id="reg-password" required />
+              <button type="button" class="password-toggle" aria-label="Show password" data-target="reg-password">👁</button>
+            </div>
+          </label>
           <div class="form-error" id="reg-error"></div>
-          <button type="submit">Register</button>
+          <button type="submit" id="reg-submit-btn">Register</button>
           <button type="button" id="back-btn">Back to Sign In</button>
         </form>
       `;
       document.getElementById('register-form').addEventListener('submit', handleRegister);
       document.getElementById('back-btn').addEventListener('click', () => renderLoginForm(el));
+      el.querySelectorAll('.password-toggle').forEach(attachPasswordToggle);
     }
 
     async function handleRegister(e) {
       e.preventDefault();
-      const email    = document.getElementById('reg-email').value.trim();
-      const password = document.getElementById('reg-password').value;
-      const errorEl  = document.getElementById('reg-error');
+      const emailInput = document.getElementById('reg-email');
+      const passInput  = document.getElementById('reg-password');
+      const email      = emailInput.value.trim();
+      const password   = passInput.value;
+      const errorEl    = document.getElementById('reg-error');
+      const submitBtn  = document.getElementById('reg-submit-btn');
       errorEl.textContent = '';
+      clearFieldErrors([emailInput, passInput]);
 
+      setButtonLoading(submitBtn, true, 'Creating account…');
       try {
         const resp = await API.register(email, password);
         if (!resp.ok) {
           let msg = 'Registration failed';
           try { msg = (await resp.json()).error || msg; } catch {}
           errorEl.textContent = msg;
+          markFieldError(emailInput);
+          setButtonLoading(submitBtn, false, 'Register');
           return;
         }
         // Auth cookies are set by the server; nothing to store in JS.
         checkSession();
       } catch {
         errorEl.textContent = 'Connection error — please try again.';
+        setButtonLoading(submitBtn, false, 'Register');
       }
     }
 
@@ -234,7 +287,7 @@
         <form id="forgot-form">
           <label>Email <input type="email" id="fp-email" required /></label>
           <div class="form-error" id="fp-error"></div>
-          <button type="submit">Send Reset Token</button>
+          <button type="submit" id="fp-submit-btn">Send Reset Token</button>
           <button type="button" id="back-btn">Back to Sign In</button>
         </form>
       `;
@@ -244,22 +297,29 @@
 
     async function handleForgotPassword(el, e) {
       e.preventDefault();
-      const email   = document.getElementById('fp-email').value.trim();
-      const errorEl = document.getElementById('fp-error');
+      const emailInput = document.getElementById('fp-email');
+      const email      = emailInput.value.trim();
+      const errorEl    = document.getElementById('fp-error');
+      const submitBtn  = document.getElementById('fp-submit-btn');
       errorEl.textContent = '';
+      clearFieldErrors([emailInput]);
 
+      setButtonLoading(submitBtn, true, 'Sending…');
       try {
         const resp = await API.forgotPassword(email);
         if (!resp.ok) {
           let msg = 'Request failed';
           try { msg = (await resp.json()).error || msg; } catch {}
           errorEl.textContent = msg;
+          markFieldError(emailInput);
+          setButtonLoading(submitBtn, false, 'Send Reset Token');
           return;
         }
         const data = await resp.json();
         renderResetPasswordForm(el, data.reset_token || '');
       } catch {
         errorEl.textContent = 'Connection error — please try again.';
+        setButtonLoading(submitBtn, false, 'Send Reset Token');
       }
     }
 
@@ -276,42 +336,104 @@
             Reset Token
             <input type="text" id="reset-token" value="${escapeHtml(prefillToken)}" required />
           </label>
-          <label>New Password <input type="password" id="new-password" required /></label>
-          <label>Confirm Password <input type="password" id="confirm-password" required /></label>
+          <label>
+            New Password
+            <div class="password-wrapper">
+              <input type="password" id="new-password" required />
+              <button type="button" class="password-toggle" aria-label="Show password" data-target="new-password">👁</button>
+            </div>
+          </label>
+          <label>
+            Confirm Password
+            <div class="password-wrapper">
+              <input type="password" id="confirm-password" required />
+              <button type="button" class="password-toggle" aria-label="Show password" data-target="confirm-password">👁</button>
+            </div>
+          </label>
           <div class="form-error" id="reset-error"></div>
-          <button type="submit">Reset Password</button>
+          <button type="submit" id="reset-submit-btn">Reset Password</button>
           <button type="button" id="back-btn">Back to Sign In</button>
         </form>
       `;
       document.getElementById('reset-form').addEventListener('submit', handleResetPassword.bind(null, el));
       document.getElementById('back-btn').addEventListener('click', () => renderLoginForm(el));
+      el.querySelectorAll('.password-toggle').forEach(attachPasswordToggle);
     }
 
     async function handleResetPassword(el, e) {
       e.preventDefault();
-      const resetToken  = document.getElementById('reset-token').value.trim();
-      const newPassword = document.getElementById('new-password').value;
-      const confirmPass = document.getElementById('confirm-password').value;
-      const errorEl     = document.getElementById('reset-error');
+      const newPassInput  = document.getElementById('new-password');
+      const confPassInput = document.getElementById('confirm-password');
+      const resetToken    = document.getElementById('reset-token').value.trim();
+      const newPassword   = newPassInput.value;
+      const confirmPass   = confPassInput.value;
+      const errorEl       = document.getElementById('reset-error');
+      const submitBtn     = document.getElementById('reset-submit-btn');
       errorEl.textContent = '';
+      clearFieldErrors([newPassInput, confPassInput]);
 
       if (newPassword !== confirmPass) {
         errorEl.textContent = 'Passwords do not match';
+        markFieldError(confPassInput);
         return;
       }
 
+      setButtonLoading(submitBtn, true, 'Resetting…');
       try {
         const resp = await API.resetPassword(resetToken, newPassword);
         if (!resp.ok) {
           let msg = 'Reset failed';
           try { msg = (await resp.json()).error || msg; } catch {}
           errorEl.textContent = msg;
+          markFieldError(newPassInput);
+          setButtonLoading(submitBtn, false, 'Reset Password');
           return;
         }
         renderLoginForm(el, 'Password updated. Please sign in with your new password.');
       } catch {
         errorEl.textContent = 'Connection error — please try again.';
+        setButtonLoading(submitBtn, false, 'Reset Password');
       }
+    }
+
+    // -- Auth form helpers ----------------------------------------------------
+
+    function setButtonLoading(btn, loading, label) {
+      if (!btn) return;
+      btn.disabled = loading;
+      btn.innerHTML = loading
+        ? '<span class="btn-spinner" aria-hidden="true"></span>' + escapeHtml(label)
+        : escapeHtml(label);
+    }
+
+    function markFieldError(input) {
+      if (!input) return;
+      input.classList.add('input-error');
+      input.classList.remove('input-shake');
+      // Re-trigger shake animation
+      void input.offsetWidth;
+      input.classList.add('input-shake');
+      input.addEventListener('animationend', function () {
+        input.classList.remove('input-shake');
+      }, { once: true });
+    }
+
+    function clearFieldErrors(inputs) {
+      for (const input of inputs) {
+        if (input) input.classList.remove('input-error', 'input-shake');
+      }
+    }
+
+    function attachPasswordToggle(btn) {
+      btn.addEventListener('click', function () {
+        const targetId = btn.getAttribute('data-target');
+        const input = document.getElementById(targetId);
+        if (!input) return;
+        const showing = input.type === 'text';
+        input.type = showing ? 'password' : 'text';
+        btn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+        btn.textContent = showing ? '👁' : '🙈';
+      });
     }
 
     // -- Logout --------------------------------------------------------------
@@ -327,6 +449,46 @@
     }
 
     // -- Expose public interface ---------------------------------------------
+
+    // Wire up the static logout button (always present in index.html).
+    const _staticLogoutBtn = document.getElementById('logout-btn');
+    if (_staticLogoutBtn) _staticLogoutBtn.addEventListener('click', logout);
+
+    // -- #23 Theme toggle ----------------------------------------------------
+
+    (function initThemeToggle() {
+      // Load saved preference
+      const saved = localStorage.getItem('theme');
+      if (saved === 'light') {
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+
+      // Inject toggle button into the header, before #header-user
+      const headerUser = document.getElementById('header-user');
+      if (headerUser) {
+        const btn = document.createElement('button');
+        btn.id = 'theme-toggle-btn';
+        btn.className = 'theme-toggle-btn';
+        btn.setAttribute('type', 'button');
+        btn.setAttribute('aria-label', 'Toggle light/dark theme');
+        btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☀️' : '🌙';
+        // Insert before header-user in the header
+        headerUser.parentNode.insertBefore(btn, headerUser);
+
+        btn.addEventListener('click', function () {
+          const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+          if (isLight) {
+            document.documentElement.removeAttribute('data-theme');
+            localStorage.setItem('theme', 'dark');
+            btn.textContent = '🌙';
+          } else {
+            document.documentElement.setAttribute('data-theme', 'light');
+            localStorage.setItem('theme', 'light');
+            btn.textContent = '☀️';
+          }
+        });
+      }
+    }());
 
     window.Auth = { checkSession };
   }
