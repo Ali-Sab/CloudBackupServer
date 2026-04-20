@@ -38,6 +38,29 @@
  * @param {string} filename
  * @returns {string}
  */
+const PREVIEW_IMAGE_EXTS = new Set(['jpg','jpeg','png','gif','bmp','webp','svg','ico']);
+const PREVIEW_PDF_EXTS   = new Set(['pdf']);
+const PREVIEW_TEXT_EXTS  = new Set([
+  'txt','md','json','yaml','yml','toml','xml','html','css','js','ts','jsx','tsx',
+  'go','py','rs','java','c','cpp','h','hpp','cs','sh','bash','zsh','rb','php',
+  'swift','kt','vue','svelte','sql','graphql','prisma','proto','csv','log','env',
+  'gitignore','dockerfile','makefile','ini','conf','cfg',
+]);
+
+/**
+ * Returns 'image', 'pdf', 'text', or null for the given filename.
+ * Pure function — no DOM or IPC dependencies.
+ * @param {string} filename
+ * @returns {'image'|'pdf'|'text'|null}
+ */
+function previewType(filename) {
+  const ext = (filename.split('.').pop() || '').toLowerCase();
+  if (PREVIEW_IMAGE_EXTS.has(ext)) return 'image';
+  if (PREVIEW_PDF_EXTS.has(ext))   return 'pdf';
+  if (PREVIEW_TEXT_EXTS.has(ext))  return 'text';
+  return null;
+}
+
 function fileTypeIcon(filename) {
   const ext = (filename.split('.').pop() || '').toLowerCase();
   const images  = ['jpg','jpeg','png','gif','bmp','webp','svg','ico','tiff','heic','avif','raw'];
@@ -178,7 +201,7 @@ function sortEntries(keys, children, field, dir) {
 // ---- Exports (for Jest) -------------------------------------------------
 
 if (typeof module !== 'undefined') {
-  module.exports = { buildBackupSummary, formatDate, formatBackupStatusLabel, fileTypeIcon, filterTree, sortEntries };
+  module.exports = { buildBackupSummary, formatDate, formatBackupStatusLabel, fileTypeIcon, previewType, filterTree, sortEntries };
 }
 
 // ---- Browser / Electron UI ----------------------------------------------
@@ -869,9 +892,22 @@ if (typeof module !== 'undefined') {
 
         const nameEl = document.createElement('span');
         nameEl.className = 'file-name' + (isCloudOnly ? '' : ' file-link');
-        nameEl.setAttribute('title', isCloudOnly ? name + ' — cloud only' : name + ' — click to open');
+        const canPreview = !isCloudOnly && entry && !!previewType(name);
+        const cloudCanPreview = isCloudOnly && entry && !!previewType(name);
+        const openHint = isCloudOnly
+          ? (cloudCanPreview ? name + ' — click to preview' : name + ' — cloud only')
+          : (canPreview ? name + ' — click to preview' : name + ' — click to open');
+        nameEl.setAttribute('title', openHint);
         nameEl.innerHTML = truncateName(name, 40);
-        if (!isCloudOnly && entry) {
+        if (entry && (canPreview || cloudCanPreview)) {
+          nameEl.setAttribute('role', 'button');
+          nameEl.setAttribute('tabindex', '0');
+          function doOpen() { openPreviewModal(entry); }
+          nameEl.addEventListener('click', doOpen);
+          nameEl.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doOpen(); }
+          });
+        } else if (!isCloudOnly && entry) {
           nameEl.setAttribute('role', 'button');
           nameEl.setAttribute('tabindex', '0');
           function doOpen() {
@@ -940,6 +976,11 @@ if (typeof module !== 'undefined') {
         }
 
         li.appendChild(buildInfoButton(entry));
+
+        if (entry && previewType(entry.name)) {
+          const prevBtn = buildPreviewButton(entry);
+          li.appendChild(prevBtn);
+        }
 
         // #29 — Right-click context menu for skip toggle (non-cloud-only files only)
         if (!isCloudOnly && entry) {
@@ -1091,12 +1132,26 @@ if (typeof module !== 'undefined') {
     const btn = document.createElement('button');
     btn.className = 'file-info-btn';
     btn.setAttribute('type', 'button');
-    btn.setAttribute('title', 'View details');
     btn.setAttribute('aria-label', 'View details');
+    btn.setAttribute('data-tooltip', 'Details');
     btn.textContent = 'ⓘ';
     btn.addEventListener('click', function (e) {
       e.stopPropagation();
       openMetadataModal(entry);
+    });
+    return btn;
+  }
+
+  function buildPreviewButton(entry) {
+    const btn = document.createElement('button');
+    btn.className = 'file-preview-btn';
+    btn.setAttribute('type', 'button');
+    btn.setAttribute('aria-label', 'Preview ' + entry.name);
+    btn.setAttribute('data-tooltip', 'Preview');
+    btn.textContent = '🔍';
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      openPreviewModal(entry);
     });
     return btn;
   }
@@ -1260,6 +1315,17 @@ if (typeof module !== 'undefined') {
       const actions = document.createElement('div');
       actions.className = 'modal-actions';
 
+      if (previewType(entry.name)) {
+        const previewBtn = document.createElement('button');
+        previewBtn.className = 'modal-action-btn modal-action-preview';
+        previewBtn.textContent = '🔍  Preview';
+        previewBtn.addEventListener('click', function () {
+          closeMetadataModal();
+          openPreviewModal(entry);
+        });
+        actions.appendChild(previewBtn);
+      }
+
       if (entry.isCloudOnly) {
         const dlBtn = document.createElement('button');
         dlBtn.className = 'modal-action-btn modal-action-download';
@@ -1314,6 +1380,169 @@ if (typeof module !== 'undefined') {
     modal.remove();
   }
 
+  // ---- File preview modal -------------------------------------------------
+
+  async function openPreviewModal(entry, opts) {
+    const type = previewType(entry.name);
+    const previewFolderId = (opts && opts.folderId != null) ? opts.folderId : currentFolderId;
+    const previewRootPath = (opts && opts.rootPath != null) ? opts.rootPath : currentPath;
+    if (!type) return;
+
+    const overlay = document.createElement('div');
+    overlay.id = 'preview-modal';
+    overlay.className = 'modal-overlay preview-overlay';
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) closePreviewModal();
+    });
+
+    const card = document.createElement('div');
+    card.className = 'modal-card preview-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    card.setAttribute('aria-label', 'Preview: ' + entry.name);
+
+    const header = document.createElement('div');
+    header.className = 'modal-header';
+    const titleEl = document.createElement('h3');
+    titleEl.className = 'modal-title';
+    titleEl.textContent = entry.name;
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'modal-close';
+    closeBtn.setAttribute('aria-label', 'Close preview');
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', closePreviewModal);
+    header.appendChild(titleEl);
+    header.appendChild(closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'preview-body';
+
+    const loadingEl = document.createElement('div');
+    loadingEl.className = 'preview-loading';
+    loadingEl.textContent = 'Loading preview…';
+    body.appendChild(loadingEl);
+
+    card.appendChild(header);
+    card.appendChild(body);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    requestAnimationFrame(function () { overlay.classList.add('modal-visible'); });
+    closeBtn.focus();
+
+    overlay._keyHandler = function (e) {
+      if (e.key === 'Escape') { closePreviewModal(); return; }
+      if (e.key !== 'Tab') return;
+      const focusable = Array.from(card.querySelectorAll(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), ' +
+        'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )).filter(function (el) { return el.offsetParent !== null; });
+      if (!focusable.length) { e.preventDefault(); return; }
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first || !card.contains(document.activeElement)) {
+          e.preventDefault(); last.focus();
+        }
+      } else {
+        if (document.activeElement === last || !card.contains(document.activeElement)) {
+          e.preventDefault(); first.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', overlay._keyHandler);
+
+    const PREVIEW_MAX = 50 * 1024 * 1024;
+    let buffer;
+    try {
+      if (entry.isCloudOnly) {
+        const resp = await window.API.downloadFromFolder(previewFolderId, entry.relativePath);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const contentLength = Number(resp.headers.get('content-length'));
+        if (contentLength && contentLength > PREVIEW_MAX) {
+          showPreviewError(body, 'File is too large to preview (' + formatSize(contentLength) + ')');
+          return;
+        }
+        buffer = await resp.arrayBuffer();
+        if (buffer.byteLength > PREVIEW_MAX) {
+          showPreviewError(body, 'File is too large to preview (' + formatSize(buffer.byteLength) + ')');
+          return;
+        }
+      } else {
+        const result = await window.electronAPI.readFilePreview(previewRootPath, entry.relativePath);
+        if (result.error === 'too_large') {
+          showPreviewError(body, 'File is too large to preview (' + formatSize(result.size) + ')');
+          return;
+        }
+        if (result.error) throw new Error(result.error);
+        buffer = result.buffer;
+      }
+    } catch (e) {
+      showPreviewError(body, 'Could not load preview: ' + e.message);
+      return;
+    }
+
+    body.innerHTML = '';
+
+    if (type === 'image') {
+      const ext = entry.name.split('.').pop().toLowerCase();
+      const mimeExt = ext === 'jpg' ? 'jpeg' : ext;
+      const mime = ext === 'svg' ? 'image/svg+xml' : 'image/' + mimeExt;
+      const blobUrl = URL.createObjectURL(new Blob([buffer], { type: mime }));
+      const img = document.createElement('img');
+      img.className = 'preview-image';
+      img.alt = entry.name;
+      img.src = blobUrl;
+      img.onload = function () { URL.revokeObjectURL(blobUrl); };
+      img.onerror = function () {
+        body.innerHTML = '';
+        showPreviewError(body, 'Could not render image');
+        URL.revokeObjectURL(blobUrl);
+      };
+      body.appendChild(img);
+    } else if (type === 'pdf') {
+      const blobUrl = URL.createObjectURL(new Blob([buffer], { type: 'application/pdf' }));
+      const embed = document.createElement('embed');
+      embed.className = 'preview-pdf';
+      embed.src = blobUrl;
+      embed.type = 'application/pdf';
+      // Revoke after a short delay — the browser needs the URL to remain valid while rendering.
+      setTimeout(function () { URL.revokeObjectURL(blobUrl); }, 10_000);
+      body.appendChild(embed);
+    } else {
+      const text = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+      const MAX_LINES = 500;
+      const lines = text.split('\n');
+      const truncated = lines.length > MAX_LINES;
+      const display = truncated ? lines.slice(0, MAX_LINES).join('\n') : text;
+
+      const pre = document.createElement('pre');
+      pre.className = 'preview-text';
+      pre.textContent = display;
+      body.appendChild(pre);
+
+      if (truncated) {
+        const note = document.createElement('div');
+        note.className = 'preview-truncation-note';
+        note.textContent = 'Showing first ' + MAX_LINES + ' of ' + lines.length + ' lines.';
+        body.appendChild(note);
+      }
+    }
+  }
+
+  function showPreviewError(body, message) {
+    body.innerHTML = '';
+    const el = document.createElement('div');
+    el.className = 'preview-error';
+    el.textContent = message;
+    body.appendChild(el);
+  }
+
+  function closePreviewModal() {
+    const modal = document.getElementById('preview-modal');
+    if (!modal) return;
+    if (modal._keyHandler) document.removeEventListener('keydown', modal._keyHandler);
+    modal.remove();
+  }
+
   function truncateName(name, max) {
     if (name.length <= max) return escapeHtml(name);
     const half = Math.floor((max - 1) / 2);
@@ -1329,6 +1558,19 @@ if (typeof module !== 'undefined') {
 
   // ---- Expose -------------------------------------------------------------
 
-  window.Files = { show, hide };
+  /**
+   * Preview a backed-up file by downloading it from the cloud.
+   * Used by the dashboard safe-delete flow which has no local path context.
+   * @param {number} folderId
+   * @param {string} relativePath
+   * @param {string} filename
+   */
+  function previewCloudFile(folderId, relativePath, filename) {
+    if (!previewType(filename)) return;
+    const entry = { name: filename, relativePath: relativePath, isDirectory: false, isCloudOnly: true };
+    openPreviewModal(entry, { folderId: folderId, rootPath: '' });
+  }
+
+  window.Files = { show, hide, previewCloudFile, previewType };
 
 })();

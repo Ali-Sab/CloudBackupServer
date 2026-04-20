@@ -280,7 +280,7 @@ if (typeof module !== 'undefined') {
     });
 
     card.querySelector('.remove-folder-btn').addEventListener('click', function () {
-      handleRemoveFolder(folder.id, name);
+      handleRemoveFolder(folder.id, name, folder.path);
     });
 
     return card;
@@ -355,7 +355,7 @@ if (typeof module !== 'undefined') {
         handleRenameFolder(folder, card);
       });
       actionsDiv.querySelector('.remove-folder-btn').addEventListener('click', function () {
-        handleRemoveFolder(folder.id, nameDiv.textContent);
+        handleRemoveFolder(folder.id, nameDiv.textContent, folder.path);
       });
     }
 
@@ -384,7 +384,7 @@ if (typeof module !== 'undefined') {
           handleRenameFolder(folder, card);
         });
         actionsDiv.querySelector('.remove-folder-btn').addEventListener('click', function () {
-          handleRemoveFolder(folder.id, nameDiv.textContent);
+          handleRemoveFolder(folder.id, nameDiv.textContent, folder.path);
         });
         window.UI.toast('Folder renamed', 'success');
       } catch {
@@ -400,9 +400,9 @@ if (typeof module !== 'undefined') {
     });
   }
 
-  // ---- #25 — Confirmation modal for folder removal -------------------------
+  // ---- Folder removal — multi-step safe-delete flow -------------------------
 
-  function showRemoveConfirmModal(name, onConfirm) {
+  function makeModal(titleText, labelId) {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay modal-overlay--confirm';
 
@@ -410,35 +410,21 @@ if (typeof module !== 'undefined') {
     card.className = 'modal-card';
     card.setAttribute('role', 'dialog');
     card.setAttribute('aria-modal', 'true');
-    card.setAttribute('aria-labelledby', 'confirm-modal-title');
+    card.setAttribute('aria-labelledby', labelId);
 
     const header = document.createElement('div');
     header.className = 'modal-header';
     const titleEl = document.createElement('h3');
     titleEl.className = 'modal-title';
-    titleEl.id = 'confirm-modal-title';
-    titleEl.textContent = 'Remove Folder';
+    titleEl.id = labelId;
+    titleEl.textContent = titleText;
     header.appendChild(titleEl);
 
     const body = document.createElement('div');
     body.className = 'modal-body';
-    const msg = document.createElement('p');
-    msg.textContent = 'Remove "' + name + '" and all its cloud backups? This cannot be undone.';
-    body.appendChild(msg);
 
     const actions = document.createElement('div');
     actions.className = 'modal-actions';
-
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'modal-action-btn modal-action-danger';
-    removeBtn.textContent = 'Remove';
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.className = 'modal-action-btn';
-    cancelBtn.textContent = 'Cancel';
-
-    actions.appendChild(removeBtn);
-    actions.appendChild(cancelBtn);
 
     card.appendChild(header);
     card.appendChild(body);
@@ -447,63 +433,275 @@ if (typeof module !== 'undefined') {
     document.body.appendChild(overlay);
 
     function close() {
-      document.removeEventListener('keydown', keyHandler);
+      document.removeEventListener('keydown', overlay._keyHandler);
       overlay.remove();
     }
 
-    function keyHandler(e) {
+    overlay._keyHandler = function (e) {
       if (e.key === 'Escape') { close(); }
       if (e.key === 'Tab') {
-        const focusable = [removeBtn, cancelBtn].filter(function (b) { return !b.disabled; });
+        const focusable = Array.from(card.querySelectorAll(
+          'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        ));
         if (focusable.length === 0) { e.preventDefault(); return; }
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault(); last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault(); first.focus();
-        }
+        const first = focusable[0], last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
       }
-    }
-
-    document.addEventListener('keydown', keyHandler);
+    };
+    document.addEventListener('keydown', overlay._keyHandler);
     overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+    requestAnimationFrame(function () { overlay.classList.add('modal-visible'); });
+
+    return { overlay, card, body, actions, close };
+  }
+
+  // Step 1 — offer to download first.
+  function showDownloadPromptModal(id, name, folderPath, onSkip, onDownloadAndRemove) {
+    const { body, actions, close } = makeModal('Remove "' + name + '"?', 'rm-step1-title');
+
+    const msg = document.createElement('p');
+    msg.textContent = 'Before removing this folder, you can download all cloud-backed files back to your local drive.';
+    body.appendChild(msg);
+
+    const note = document.createElement('p');
+    note.className = 'remove-modal-note';
+    note.textContent = 'Skipping will permanently erase all cloud backups for this folder.';
+    body.appendChild(note);
+
+    const dlBtn = document.createElement('button');
+    dlBtn.className = 'modal-action-btn modal-action-download';
+    dlBtn.textContent = '↓  Download All & Remove';
+
+    const skipBtn = document.createElement('button');
+    skipBtn.className = 'modal-action-btn modal-action-danger';
+    skipBtn.textContent = 'Skip — Show What I\'ll Lose';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'modal-action-btn';
+    cancelBtn.textContent = 'Cancel';
+
+    actions.appendChild(dlBtn);
+    actions.appendChild(skipBtn);
+    actions.appendChild(cancelBtn);
 
     cancelBtn.addEventListener('click', close);
-    removeBtn.addEventListener('click', function () {
-      close();
-      onConfirm();
-    });
+    cancelBtn.focus();
 
-    requestAnimationFrame(function () {
-      overlay.classList.add('modal-visible');
-      cancelBtn.focus(); // safe default
+    dlBtn.addEventListener('click', function () {
+      close();
+      onDownloadAndRemove();
+    });
+    skipBtn.addEventListener('click', function () {
+      close();
+      onSkip();
     });
   }
 
-  async function handleRemoveFolder(id, name) {
-    showRemoveConfirmModal(name, async function () {
-      try {
-        const resp = await window.API.removeFolder(id);
-        if (!resp.ok) {
-          window.UI.toast('Could not remove folder', 'error');
-          return;
-        }
-        const card = document.querySelector('.folder-card[data-folder-id="' + id + '"]');
-        if (card) card.remove();
+  // Step 2 — show what will be lost, let user preview files, then confirm deletion.
+  async function showFileLossModal(id, name, folderPath, onConfirm, onBack) {
+    const { overlay, body, actions, close } = makeModal('Checking for cloud-only files…', 'rm-step2-title');
 
-        const container = document.getElementById('folder-list');
-        if (container && container.querySelectorAll('.folder-card').length === 0) {
-          container.innerHTML = '';
-          container.appendChild(buildEmptyState());
-          renderSummaryStrip([]);
-        }
+    const loadingEl = document.createElement('p');
+    loadingEl.className = 'remove-modal-loading';
+    loadingEl.textContent = 'Loading backed-up files…';
+    body.appendChild(loadingEl);
 
-        window.UI.toast('Folder removed', 'success');
-      } catch {
-        window.UI.toast('Could not reach server', 'error');
-      }
+    const backBtn = document.createElement('button');
+    backBtn.className = 'modal-action-btn';
+    backBtn.textContent = '← Go Back';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'modal-action-btn';
+    cancelBtn.textContent = 'Cancel';
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'modal-action-btn modal-action-danger';
+    deleteBtn.textContent = 'Permanently Delete Everything';
+    deleteBtn.disabled = true;
+
+    actions.appendChild(backBtn);
+    actions.appendChild(cancelBtn);
+    actions.appendChild(deleteBtn);
+
+    cancelBtn.addEventListener('click', close);
+    backBtn.addEventListener('click', function () { close(); onBack(); });
+    deleteBtn.addEventListener('click', function () { close(); onConfirm(); });
+    cancelBtn.focus();
+
+    // Fetch backups and scan the actual local filesystem in parallel.
+    let backups = [], localPaths = new Set();
+    try {
+      const [backupResp, localFiles] = await Promise.all([
+        window.API.getFolderBackups(id),
+        window.electronAPI.getAllFilePaths(folderPath),
+      ]);
+      if (backupResp.ok) backups = (await backupResp.json()).backups || [];
+      for (const p of (localFiles || [])) localPaths.add(p);
+    } catch {}
+
+    // Only files that have no local copy will be gone forever.
+    const cloudOnly = backups.filter(function (b) {
+      return !localPaths.has(b.relative_path || b.path);
     });
+
+    body.innerHTML = '';
+    const titleEl = overlay.querySelector('#rm-step2-title');
+
+    if (cloudOnly.length === 0) {
+      if (titleEl) titleEl.textContent = 'Remove "' + name + '"';
+      const msg = document.createElement('p');
+      msg.textContent = backups.length > 0
+        ? 'All backed-up files exist on your local drive — nothing in the cloud will be lost.'
+        : 'No cloud backups exist for this folder.';
+      body.appendChild(msg);
+
+      // No files at risk — swap the scary actions for a plain confirmation.
+      actions.innerHTML = '';
+      const plainRemoveBtn = document.createElement('button');
+      plainRemoveBtn.className = 'modal-action-btn';
+      plainRemoveBtn.textContent = 'Remove Folder';
+      plainRemoveBtn.addEventListener('click', function () { close(); onConfirm(); });
+      const plainCancelBtn = document.createElement('button');
+      plainCancelBtn.className = 'modal-action-btn';
+      plainCancelBtn.textContent = 'Cancel';
+      plainCancelBtn.addEventListener('click', close);
+      actions.appendChild(plainRemoveBtn);
+      actions.appendChild(plainCancelBtn);
+      plainRemoveBtn.focus();
+      return;
+    }
+
+    if (titleEl) titleEl.textContent = 'Files That Will Be Lost Forever';
+    const summary = document.createElement('p');
+    summary.className = 'remove-modal-summary';
+    summary.textContent = cloudOnly.length + ' file' + (cloudOnly.length === 1 ? '' : 's') +
+      ' exist only in the cloud and will be permanently deleted.';
+    body.appendChild(summary);
+
+    const list = document.createElement('ul');
+    list.className = 'remove-file-list';
+
+    for (const b of cloudOnly) {
+      const relPath = b.relative_path || b.path || '';
+      const li = document.createElement('li');
+      li.className = 'remove-file-item';
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'remove-file-name';
+      nameSpan.textContent = relPath;
+      li.appendChild(nameSpan);
+
+      const filename = relPath.split('/').pop();
+      const canPreview = window.Files && window.Files.previewType && window.Files.previewType(filename);
+      if (canPreview) {
+        const previewBtn = document.createElement('button');
+        previewBtn.className = 'remove-file-preview-btn';
+        previewBtn.textContent = '🔍 Preview';
+        previewBtn.setAttribute('aria-label', 'Preview ' + filename);
+        previewBtn.addEventListener('click', function () {
+          if (window.Files && window.Files.previewCloudFile) {
+            window.Files.previewCloudFile(id, relPath, filename);
+          }
+        });
+        li.appendChild(previewBtn);
+      }
+
+      list.appendChild(li);
+    }
+    body.appendChild(list);
+
+    const confirm = document.createElement('label');
+    confirm.className = 'remove-confirm-checkbox-label';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.id = 'rm-confirm-checkbox';
+    checkbox.addEventListener('change', function () {
+      deleteBtn.disabled = !checkbox.checked;
+      if (!deleteBtn.disabled) deleteBtn.focus();
+    });
+    confirm.appendChild(checkbox);
+    confirm.appendChild(document.createTextNode(' I understand these files cannot be recovered'));
+    body.appendChild(confirm);
+  }
+
+  // Download-and-remove flow: download all backups then delete.
+  async function downloadAllAndRemove(id, name, folderPath) {
+    let backups = [];
+    try {
+      const resp = await window.API.getFolderBackups(id);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+      backups = data.backups || [];
+    } catch (e) {
+      window.UI.toast('Could not fetch backup list: ' + e.message, 'error');
+      return;
+    }
+
+    if (backups.length === 0) {
+      await doRemoveFolder(id, name);
+      return;
+    }
+
+    window.UI.toast('Downloading ' + backups.length + ' file' + (backups.length === 1 ? '' : 's') + '…', 'success');
+    let failed = 0;
+    for (const b of backups) {
+      const relPath = b.relative_path || b.path;
+      try {
+        const resp = await window.API.downloadFromFolder(id, relPath);
+        if (!resp.ok) { failed++; continue; }
+        const buffer = await resp.arrayBuffer();
+        const result = await window.electronAPI.saveFile(folderPath, relPath, buffer);
+        if (result.error) failed++;
+      } catch { failed++; }
+    }
+
+    if (failed > 0) {
+      window.UI.toast(failed + ' file' + (failed === 1 ? '' : 's') + ' could not be downloaded. Aborting removal.', 'error');
+      return;
+    }
+
+    window.UI.toast('All files downloaded. Removing folder…', 'success');
+    await doRemoveFolder(id, name);
+  }
+
+  async function doRemoveFolder(id, name) {
+    try {
+      const resp = await window.API.removeFolder(id);
+      if (!resp.ok) {
+        window.UI.toast('Could not remove folder', 'error');
+        return;
+      }
+      const card = document.querySelector('.folder-card[data-folder-id="' + id + '"]');
+      if (card) card.remove();
+      const container = document.getElementById('folder-list');
+      if (container && container.querySelectorAll('.folder-card').length === 0) {
+        container.innerHTML = '';
+        container.appendChild(buildEmptyState());
+        renderSummaryStrip([]);
+      }
+      window.UI.toast('Folder removed', 'success');
+    } catch {
+      window.UI.toast('Could not reach server', 'error');
+    }
+  }
+
+  async function handleRemoveFolder(id, name, folderPath) {
+    showDownloadPromptModal(
+      id, name, folderPath,
+      // onSkip — show file loss warning
+      function () {
+        showFileLossModal(
+          id, name, folderPath,
+          // onConfirm
+          function () { doRemoveFolder(id, name); },
+          // onBack — return to step 1
+          function () { handleRemoveFolder(id, name, folderPath); }
+        );
+      },
+      // onDownloadAndRemove
+      function () { downloadAllAndRemove(id, name, folderPath); }
+    );
   }
 
   // ---- Helpers ------------------------------------------------------------

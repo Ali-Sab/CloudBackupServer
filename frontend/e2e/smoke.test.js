@@ -54,6 +54,37 @@ const httpPost   = (path, body, token) => httpRequest('POST',   path, body, toke
 const httpGet    = (path, token)        => httpRequest('GET',    path, null, token);
 const httpDelete = (path, token)        => httpRequest('DELETE', path, null, token);
 
+/** Upload raw file bytes to a backup endpoint. Returns { status, body }. */
+function httpUploadFile(urlPath, content, token) {
+  return new Promise((resolve, reject) => {
+    const buf    = Buffer.isBuffer(content) ? content : Buffer.from(content);
+    const sha256 = require('crypto').createHash('sha256').update(buf).digest('hex');
+    const parsed = new URL(`${BASE_URL}${urlPath}`);
+    const headers = {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(buf.length),
+      'X-Checksum-SHA256': sha256,
+      'X-File-Size': String(buf.length),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    };
+    const req = http.request(
+      { hostname: parsed.hostname, port: Number(parsed.port) || 80,
+        path: parsed.pathname, method: 'PUT', headers },
+      (res) => {
+        let raw = '';
+        res.on('data', c => { raw += c; });
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(raw) }); }
+          catch { resolve({ status: res.statusCode, body: {} }); }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.write(buf);
+    req.end();
+  });
+}
+
 // ---- Helpers -----------------------------------------------------------------
 
 /** Create a real temp directory with a couple of files for upload tests. */
@@ -286,9 +317,15 @@ test('T8: removing a folder removes its card from the dashboard', async () => {
 
   await page.click('.remove-folder-btn');
 
-  // Wait for custom confirm modal and confirm removal.
-  await page.waitForSelector('.modal-action-danger', { timeout: 5_000 });
-  await page.click('.modal-action-danger');
+  // Step 1 — download prompt. Skip straight to file-loss warning.
+  await page.waitForSelector('.modal-overlay.modal-visible', { timeout: 5_000 });
+  await page.click('.modal-action-danger'); // "Skip — Show What I'll Lose"
+
+  // Step 2 — no cloud-only files: plain "Remove Folder" button, no danger styling.
+  await page.waitForSelector('.modal-overlay.modal-visible', { timeout: 5_000 });
+  const deleteBtn = page.locator('.modal-action-btn', { hasText: 'Remove Folder' });
+  await expect(deleteBtn).toBeEnabled({ timeout: 5_000 });
+  await deleteBtn.click();
 
   // Card must disappear.
   await expect(page.locator('.folder-card')).toHaveCount(0, { timeout: 8_000 });
@@ -589,4 +626,208 @@ test('T19: settings panel opens via the ⚙️ button and shows appearance contr
   await page.click('#settings-close-btn');
   await expect(page.locator('#dashboard')).not.toHaveClass(/hidden/);
   await expect(page.locator('#settings')).toHaveClass(/hidden/);
+});
+
+// ---- T20–T24: Safe-delete flow -----------------------------------------------
+
+// T20: Clicking Remove shows the download-prompt modal with all three options.
+test('T20: remove folder shows download-prompt modal with all three action buttons', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password, token } = await registerFreshUser('rm-prompt');
+  await httpPost('/api/folders', { path: tmpDir }, token);
+
+  await loginViaUI(page, email, password);
+  await page.waitForSelector('.folder-card', { timeout: 8_000 });
+
+  await page.click('.remove-folder-btn');
+  await page.waitForSelector('.modal-overlay.modal-visible', { timeout: 5_000 });
+
+  // All three buttons must be present.
+  await expect(page.locator('.modal-action-download')).toBeVisible();  // Download All & Remove
+  await expect(page.locator('.modal-action-danger')).toBeVisible();    // Skip
+  await expect(page.locator('.modal-action-btn:has-text("Cancel")')).toBeVisible();
+});
+
+// T21: Cancel on the download-prompt modal leaves the folder card intact.
+test('T21: cancelling the download prompt leaves the folder card intact', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password, token } = await registerFreshUser('rm-cancel');
+  await httpPost('/api/folders', { path: tmpDir }, token);
+
+  await loginViaUI(page, email, password);
+  await page.waitForSelector('.folder-card', { timeout: 8_000 });
+
+  await page.click('.remove-folder-btn');
+  await page.waitForSelector('.modal-overlay.modal-visible', { timeout: 5_000 });
+  await page.click('.modal-action-btn:has-text("Cancel")');
+
+  // Modal must be gone, card must still be there.
+  await expect(page.locator('.modal-overlay')).toHaveCount(0, { timeout: 3_000 });
+  await expect(page.locator('.folder-card')).toHaveCount(1);
+});
+
+// T22: Skip with no cloud-only files shows a safe message and delete button enabled immediately.
+test('T22: skip with no cloud-only files shows safe message and enables delete without checkbox', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password, token } = await registerFreshUser('rm-safe');
+  await httpPost('/api/folders', { path: tmpDir }, token);
+
+  await loginViaUI(page, email, password);
+  await page.waitForSelector('.folder-card', { timeout: 8_000 });
+
+  await page.click('.remove-folder-btn');
+  await page.waitForSelector('.modal-overlay.modal-visible', { timeout: 5_000 });
+  await page.click('.modal-action-danger'); // Skip
+
+  // Step 2 modal appears — no cloud-only files, so plain (non-red) Remove Folder button shown.
+  await page.waitForSelector('.modal-overlay.modal-visible', { timeout: 5_000 });
+
+  // No danger button and no file list — safe path only.
+  await expect(page.locator('.modal-action-danger')).toHaveCount(0, { timeout: 5_000 });
+  await expect(page.locator('.remove-file-list')).toHaveCount(0);
+
+  await page.click('.modal-action-btn:has-text("Remove Folder")');
+  await expect(page.locator('.folder-card')).toHaveCount(0, { timeout: 8_000 });
+});
+
+// T23: "Go Back" on step 2 returns to the download-prompt modal.
+test('T23: go back from file-loss modal returns to download-prompt modal', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password, token } = await registerFreshUser('rm-goback');
+
+  // Upload a cloud-only file so the full step-2 modal (with Go Back) is shown.
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, token);
+  const folderId = addRes.body.id;
+  await httpUploadFile(`/api/folders/${folderId}/backup/hello.txt`, 'hello from e2e', token);
+  fs.unlinkSync(path.join(tmpDir, 'hello.txt'));
+
+  await loginViaUI(page, email, password);
+  await page.waitForSelector('.folder-card', { timeout: 8_000 });
+
+  // Open step 1, skip to step 2.
+  await page.click('.remove-folder-btn');
+  await page.waitForSelector('.modal-overlay.modal-visible', { timeout: 5_000 });
+  await page.click('.modal-action-danger');
+  await page.waitForSelector('.remove-file-list', { timeout: 8_000 });
+
+  // Go Back.
+  await page.click('.modal-action-btn:has-text("Go Back")');
+
+  // Step 1 modal must reappear with the download button.
+  await page.waitForSelector('.modal-overlay.modal-visible', { timeout: 5_000 });
+  await expect(page.locator('.modal-action-download')).toBeVisible();
+
+  // Folder must still be there.
+  await expect(page.locator('.folder-card')).toHaveCount(1);
+});
+
+// T24: Skip with a cloud-only file shows it in the list, requires checkbox, preview button present.
+test('T24: skip with cloud-only file shows file in loss list, requires checkbox to enable delete', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password, token } = await registerFreshUser('rm-cloudonly');
+
+  // Create folder, upload hello.txt to cloud, then delete it locally so it becomes cloud-only.
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, token);
+  const folderId = addRes.body.id;
+  const fileContent = 'hello from e2e test';
+  await httpUploadFile(`/api/folders/${folderId}/backup/hello.txt`, fileContent, token);
+  fs.unlinkSync(path.join(tmpDir, 'hello.txt'));
+
+  await loginViaUI(page, email, password);
+  await page.waitForSelector('.folder-card', { timeout: 8_000 });
+
+  // Open step 1, skip to step 2.
+  await page.click('.remove-folder-btn');
+  await page.waitForSelector('.modal-overlay.modal-visible', { timeout: 5_000 });
+  await page.click('.modal-action-danger'); // Skip
+
+  // Step 2 — file-loss modal.
+  await page.waitForSelector('.remove-file-list', { timeout: 8_000 });
+
+  // hello.txt must appear in the loss list.
+  await expect(page.locator('.remove-file-name')).toContainText('hello.txt');
+
+  // Preview button must be present (hello.txt is a text file).
+  await expect(page.locator('.remove-file-preview-btn')).toBeVisible();
+
+  // Delete button must be disabled until checkbox is checked.
+  const deleteBtn = page.locator('.modal-action-danger');
+  await expect(deleteBtn).toBeDisabled();
+
+  await page.check('#rm-confirm-checkbox');
+  await expect(deleteBtn).toBeEnabled({ timeout: 2_000 });
+
+  // Confirm deletion.
+  await deleteBtn.click();
+  await expect(page.locator('.folder-card')).toHaveCount(0, { timeout: 8_000 });
+});
+
+// ---- T25–T27: File preview modal ---------------------------------------------
+
+/** Open the file browser for the single folder card already on the dashboard. */
+async function openFileBrowser(page, token) {
+  await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
+  await page.waitForSelector('.folder-card', { timeout: 8_000 });
+  await page.click('.open-folder-btn');
+  await page.waitForSelector('#file-browser:not(.hidden)', { timeout: 8_000 });
+  await page.waitForSelector('.file-item:not(.is-dir):not(.file-empty)', { timeout: 8_000 });
+}
+
+// T25: Clicking a previewable file name opens the preview modal.
+test('T25: clicking a previewable file name opens the in-app preview modal', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password, token } = await registerFreshUser('preview-click');
+  await httpPost('/api/folders', { path: tmpDir }, token);
+
+  await loginViaUI(page, email, password);
+  await openFileBrowser(page, token);
+
+  // hello.txt is a text file — previewable. Click its name.
+  await page.locator('.file-name.file-link', { hasText: 'hello.txt' }).click();
+
+  // Preview modal must appear with the filename in the header.
+  await expect(page.locator('#preview-modal')).toBeVisible({ timeout: 5_000 });
+  await expect(page.locator('#preview-modal .modal-title')).toHaveText('hello.txt');
+});
+
+// T26: The row-level 🔍 preview button opens the preview modal.
+test('T26: the row preview button opens the preview modal', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password, token } = await registerFreshUser('preview-btn');
+  await httpPost('/api/folders', { path: tmpDir }, token);
+
+  await loginViaUI(page, email, password);
+  await openFileBrowser(page, token);
+
+  // Hover the hello.txt row to reveal its preview button, then click.
+  const helloRow = page.locator('.file-item', { hasText: 'hello.txt' });
+  await helloRow.hover();
+  await helloRow.locator('.file-preview-btn').click();
+
+  await expect(page.locator('#preview-modal')).toBeVisible({ timeout: 5_000 });
+  await expect(page.locator('#preview-modal .modal-title')).toHaveText('hello.txt');
+});
+
+// T27: Closing the preview modal with × removes it from the DOM.
+test('T27: closing the preview modal with × removes it', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password, token } = await registerFreshUser('preview-close');
+  await httpPost('/api/folders', { path: tmpDir }, token);
+
+  await loginViaUI(page, email, password);
+  await openFileBrowser(page, token);
+
+  await page.locator('.file-name.file-link', { hasText: 'hello.txt' }).click();
+  await expect(page.locator('#preview-modal')).toBeVisible({ timeout: 5_000 });
+
+  await page.locator('#preview-modal .modal-close').click();
+  await expect(page.locator('#preview-modal')).toHaveCount(0, { timeout: 3_000 });
 });
