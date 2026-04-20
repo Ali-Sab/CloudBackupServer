@@ -77,6 +77,32 @@
       });
     },
 
+    // ---- Account management ----
+
+    /** Change the authenticated user's email. Requires current password. */
+    changeEmail(newEmail, currentPassword) {
+      return APIClient.request('/api/account/email', {
+        method: 'PUT',
+        body: JSON.stringify({ new_email: newEmail, current_password: currentPassword }),
+      });
+    },
+
+    /** Change the authenticated user's password. Requires current password. Revokes all sessions. */
+    changePassword(currentPassword, newPassword) {
+      return APIClient.request('/api/account/password', {
+        method: 'PUT',
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+      });
+    },
+
+    /** Permanently delete the account and all its data. Requires current password. */
+    deleteAccount(currentPassword) {
+      return APIClient.request('/api/account', {
+        method: 'DELETE',
+        body: JSON.stringify({ current_password: currentPassword }),
+      });
+    },
+
     // ---- Per-folder files ----
 
     /** Returns { files: [...] } for the given folder. */

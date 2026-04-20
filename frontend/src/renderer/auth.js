@@ -454,6 +454,15 @@
     const _staticLogoutBtn = document.getElementById('logout-btn');
     if (_staticLogoutBtn) _staticLogoutBtn.addEventListener('click', logout);
 
+    // Wire up Account and Settings nav buttons.
+    document.getElementById('account-nav-btn').addEventListener('click', function () {
+      const email = document.getElementById('header-email').textContent;
+      window.Account.show(email);
+    });
+    document.getElementById('settings-nav-btn').addEventListener('click', function () {
+      window.Settings.show();
+    });
+
     // -- #23 Theme toggle ----------------------------------------------------
 
     (function initThemeToggle() {
