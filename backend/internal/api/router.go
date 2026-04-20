@@ -9,9 +9,17 @@ import (
 	"github.com/ali-sab/cloudbackupserver/backend/internal/storage"
 )
 
+// NewTestRouter is like NewRouter but uses bcrypt.MinCost for faster tests.
+func NewTestRouter(pool *pgxpool.Pool, sessionSvc *session.Service, store storage.Backend) *chi.Mux {
+	return newRouter(newTestHandler(pool, sessionSvc, store))
+}
+
 // NewRouter wires up all routes and middleware and returns the root handler.
 func NewRouter(pool *pgxpool.Pool, sessionSvc *session.Service, store storage.Backend) *chi.Mux {
-	h := NewHandler(pool, sessionSvc, store)
+	return newRouter(NewHandler(pool, sessionSvc, store))
+}
+
+func newRouter(h *Handler) *chi.Mux {
 
 	r := chi.NewRouter()
 
@@ -41,12 +49,20 @@ func NewRouter(pool *pgxpool.Pool, sessionSvc *session.Service, store storage.Ba
 			r.Post("/", h.PostFolder)
 			r.Route("/{folderID}", func(r chi.Router) {
 				r.Delete("/", h.DeleteFolder)
+				r.Put("/", h.PutFolder)
 				r.Get("/files", h.GetFiles)
 				r.Put("/sync", h.PutSyncFiles)
 				r.Get("/backups", h.GetFileBackups)
 				r.Put("/backup/*", h.PutFileBackup)
 				r.Get("/backup/*", h.GetFileBackup)
 			})
+		})
+
+		r.Route("/account", func(r chi.Router) {
+			r.Use(h.requireAuth)
+			r.Put("/email", h.PutAccountEmail)
+			r.Put("/password", h.PutAccountPassword)
+			r.Delete("/", h.DeleteAccount)
 		})
 	})
 

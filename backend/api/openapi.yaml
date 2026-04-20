@@ -31,7 +31,7 @@ info:
     and returns a 404 when the email is not found (anti-enumeration is disabled).
     Both behaviours will be reversed before production: the token will be delivered by email
     and the response will look identical regardless of whether the email exists.
-  version: 0.3.0
+  version: 0.3.1
   license:
     name: GNU General Public License v3.0
     url: https://www.gnu.org/licenses/gpl-3.0.html
@@ -56,6 +56,8 @@ tags:
     description: Per-folder file list management (requires auth)
   - name: Backup
     description: Per-folder file content upload and download (requires auth)
+  - name: Account
+    description: Account management — change email, change password, delete account (requires auth)
 
 paths:
   /api/health:
@@ -336,6 +338,30 @@ paths:
           type: integer
           format: int64
         description: Watched folder ID
+    put:
+      summary: Rename a watched folder
+      operationId: renameFolder
+      tags: [Folders]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: My Documents
+      responses:
+        "204":
+          description: Folder renamed
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
     delete:
       summary: Delete a watched folder
       description: |
@@ -551,6 +577,75 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+
+  /api/account/email:
+    put:
+      summary: Change email address
+      operationId: changeEmail
+      tags: [Account]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeEmailRequest"
+      responses:
+        "200":
+          description: Email updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email:
+                    type: string
+                    format: email
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/account/password:
+    put:
+      summary: Change password while logged in
+      description: Requires the current password. Revokes all other sessions on success.
+      operationId: changePassword
+      tags: [Account]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "204":
+          description: Password updated; all other sessions revoked
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/account:
+    delete:
+      summary: Permanently delete account and all data
+      description: Requires the current password. All folders, backups, and storage objects are deleted.
+      operationId: deleteAccount
+      tags: [Account]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteAccountRequest"
+      responses:
+        "204":
+          description: Account deleted; auth cookies cleared
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
 components:
   securitySchemes:
@@ -867,6 +962,36 @@ components:
         skipped:
           type: boolean
           description: true when the checksum matched and no upload occurred
+
+    ChangeEmailRequest:
+      type: object
+      required: [new_email, current_password]
+      properties:
+        new_email:
+          type: string
+          format: email
+        current_password:
+          type: string
+          format: password
+
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+          format: password
+        new_password:
+          type: string
+          format: password
+
+    DeleteAccountRequest:
+      type: object
+      required: [current_password]
+      properties:
+        current_password:
+          type: string
+          format: password
 
     ErrorResponse:
       type: object

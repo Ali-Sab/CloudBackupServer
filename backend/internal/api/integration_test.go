@@ -106,7 +106,7 @@ func setupTestEnv(t *testing.T) (*httptest.Server, *memStore, *pgxpool.Pool) {
 
 	store := newMemStore()
 	svc := session.NewService("integration-test-jwt-secret")
-	router := api.NewRouter(pool, svc, store)
+	router := api.NewTestRouter(pool, svc, store)
 	return httptest.NewServer(router), store, pool
 }
 
@@ -189,6 +189,15 @@ func authPut(t *testing.T, client *http.Client, url, body string) *http.Response
 func authDelete(t *testing.T, client *http.Client, url string) *http.Response {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodDelete, url, nil)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
+func authDeleteWithBody(t *testing.T, client *http.Client, url, body string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodDelete, url, bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	return resp
@@ -1051,4 +1060,154 @@ func TestIntegration_ResetToken_Expired(t *testing.T) {
 	var errResp api.ErrorResponse
 	decodeJSON(t, resp, &errResp)
 	assert.Contains(t, errResp.Error, "expired")
+}
+
+// ---- Account management tests ----
+
+func TestIntegration_RenameFolder(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	client := registerAndLogin(t, srv, "rename-folder@example.com", "pass")
+	folderID := addFolder(t, client, srv.URL, "/home/user/docs")
+
+	// Happy path — rename succeeds.
+	resp := authPut(t, client, fmt.Sprintf("%s/api/folders/%d", srv.URL, folderID), `{"name":"My Docs"}`)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// Verify the new name appears in the folder list.
+	resp = authGet(t, client, srv.URL+"/api/folders")
+	var stats api.FolderStatsResponse
+	decodeJSON(t, resp, &stats)
+	require.Len(t, stats.Folders, 1)
+	assert.Equal(t, "My Docs", stats.Folders[0].Name)
+
+	// Missing name field → 400.
+	resp = authPut(t, client, fmt.Sprintf("%s/api/folders/%d", srv.URL, folderID), `{"name":""}`)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	// Non-existent folder → 404.
+	resp = authPut(t, client, srv.URL+"/api/folders/99999", `{"name":"ghost"}`)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestIntegration_ChangeEmail_HappyPath(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	client := registerAndLogin(t, srv, "ce-happy@example.com", "pass123")
+
+	resp := authPut(t, client, srv.URL+"/api/account/email",
+		`{"new_email":"ce-new@example.com","current_password":"pass123"}`)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body map[string]string
+	decodeJSON(t, resp, &body)
+	assert.Equal(t, "ce-new@example.com", body["email"])
+
+	// JWT carries email from login time; verify the change persisted by logging in with the new email.
+	resp = postJSON(t, srv.URL+"/api/auth/login", `{"email":"ce-new@example.com","password":"pass123"}`)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestIntegration_ChangeEmail_WrongPassword(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	client := registerAndLogin(t, srv, "ce-wrong@example.com", "pass123")
+
+	resp := authPut(t, client, srv.URL+"/api/account/email",
+		`{"new_email":"other@example.com","current_password":"wrongpass"}`)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
+
+func TestIntegration_ChangeEmail_DuplicateEmail(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	// Register two users.
+	registerAndLogin(t, srv, "existing@example.com", "pass")
+	client := registerAndLogin(t, srv, "ce-dup@example.com", "pass")
+
+	// Try to change email to the already-taken address.
+	resp := authPut(t, client, srv.URL+"/api/account/email",
+		`{"new_email":"existing@example.com","current_password":"pass"}`)
+	assert.Equal(t, http.StatusConflict, resp.StatusCode)
+}
+
+func TestIntegration_ChangePassword_HappyPath(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	client := registerAndLogin(t, srv, "cp-happy@example.com", "oldpass")
+
+	resp := authPut(t, client, srv.URL+"/api/account/password",
+		`{"current_password":"oldpass","new_password":"newpass"}`)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// Old password must no longer work.
+	resp = postJSON(t, srv.URL+"/api/auth/login",
+		`{"email":"cp-happy@example.com","password":"oldpass"}`)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+
+	// New password must work.
+	resp = postJSON(t, srv.URL+"/api/auth/login",
+		`{"email":"cp-happy@example.com","password":"newpass"}`)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestIntegration_ChangePassword_WrongCurrent(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	client := registerAndLogin(t, srv, "cp-wrong@example.com", "pass123")
+
+	resp := authPut(t, client, srv.URL+"/api/account/password",
+		`{"current_password":"notmypass","new_password":"newpass"}`)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
+
+func TestIntegration_DeleteAccount_HappyPath(t *testing.T) {
+	srv, store := setupTestServerWithStore(t)
+	defer srv.Close()
+
+	client := registerAndLogin(t, srv, "del-acct@example.com", "pass")
+	folderID := addFolder(t, client, srv.URL, "/home/user/docs")
+	authUpload(t, client, folderURL(srv.URL, folderID)+"/backup/file.txt", "ck1", []byte("data"))
+
+	store.mu.Lock()
+	require.Equal(t, 1, len(store.objects))
+	store.mu.Unlock()
+
+	resp := authDeleteWithBody(t, client, srv.URL+"/api/account",
+		`{"current_password":"pass"}`)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// Storage must be cleared.
+	store.mu.Lock()
+	assert.Equal(t, 0, len(store.objects))
+	store.mu.Unlock()
+
+	// Session must be gone — cookie was cleared by the server.
+	resp = authGet(t, client, srv.URL+"/api/session")
+	var s api.SessionResponse
+	decodeJSON(t, resp, &s)
+	assert.False(t, s.LoggedIn)
+}
+
+func TestIntegration_DeleteAccount_WrongPassword(t *testing.T) {
+	srv := setupTestServer(t)
+	defer srv.Close()
+
+	client := registerAndLogin(t, srv, "del-wrong@example.com", "pass")
+
+	resp := authDeleteWithBody(t, client, srv.URL+"/api/account",
+		`{"current_password":"wrong"}`)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+
+	// Account must still exist.
+	resp = authGet(t, client, srv.URL+"/api/session")
+	var s api.SessionResponse
+	decodeJSON(t, resp, &s)
+	assert.True(t, s.LoggedIn)
 }

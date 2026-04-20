@@ -105,6 +105,30 @@ func UpdateUserPassword(ctx context.Context, pool *pgxpool.Pool, userID int64, h
 	return nil
 }
 
+// UpdateUserEmail changes the email address for the given user.
+// Returns a pgconn.PgError with Code "23505" if the new email is already taken.
+func UpdateUserEmail(ctx context.Context, pool *pgxpool.Pool, userID int64, newEmail string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE users SET email = $1, updated_at = NOW() WHERE id = $2`,
+		newEmail, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("updating user email: %w", err)
+	}
+	return nil
+}
+
+// DeleteUser permanently removes the user row. All child rows (refresh_tokens,
+// password_reset_tokens, watched_paths, watched_files, file_backups) are
+// cascade-deleted by the database FK constraints.
+func DeleteUser(ctx context.Context, pool *pgxpool.Pool, userID int64) error {
+	_, err := pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("deleting user: %w", err)
+	}
+	return nil
+}
+
 // ---- Refresh tokens ----
 
 // CreateRefreshToken inserts a new refresh token row.
@@ -267,6 +291,22 @@ func DeleteWatchedPath(ctx context.Context, pool *pgxpool.Pool, id, userID int64
 	)
 	if err != nil {
 		return fmt.Errorf("deleting watched path: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("watched path %d not found: %w", id, pgx.ErrNoRows)
+	}
+	return nil
+}
+
+// RenameWatchedPath updates the display name of a watched path owned by userID.
+// Returns pgx.ErrNoRows (wrapped) if not found or not owned by this user.
+func RenameWatchedPath(ctx context.Context, pool *pgxpool.Pool, id, userID int64, name string) error {
+	tag, err := pool.Exec(ctx,
+		`UPDATE watched_paths SET name = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3`,
+		name, id, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("renaming watched path: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("watched path %d not found: %w", id, pgx.ErrNoRows)

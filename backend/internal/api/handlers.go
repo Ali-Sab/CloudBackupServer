@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/mail"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,14 +27,20 @@ import (
 
 // Handler holds shared dependencies for all HTTP handlers.
 type Handler struct {
-	db         *pgxpool.Pool    // may be nil in unit tests that don't touch the DB
-	sessionSvc *session.Service
-	storage    storage.Backend  // may be nil in unit tests that don't touch storage
+	db           *pgxpool.Pool   // may be nil in unit tests that don't touch the DB
+	sessionSvc   *session.Service
+	storage      storage.Backend // may be nil in unit tests that don't touch storage
+	bcryptCost  int
 }
 
 // NewHandler creates a Handler with the provided dependencies.
 func NewHandler(pool *pgxpool.Pool, sessionSvc *session.Service, store storage.Backend) *Handler {
-	return &Handler{db: pool, sessionSvc: sessionSvc, storage: store}
+	return &Handler{db: pool, sessionSvc: sessionSvc, storage: store, bcryptCost: bcrypt.DefaultCost}
+}
+
+// newTestHandler creates a Handler with bcrypt.MinCost for faster tests.
+func newTestHandler(pool *pgxpool.Pool, sessionSvc *session.Service, store storage.Backend) *Handler {
+	return &Handler{db: pool, sessionSvc: sessionSvc, storage: store, bcryptCost: bcrypt.MinCost}
 }
 
 // ---- Request / response types (exported for tests) ----
@@ -117,6 +124,28 @@ type ResetPasswordRequest struct {
 type AddFolderRequest struct {
 	Path string `json:"path"`
 	Name string `json:"name,omitempty"`
+}
+
+// RenameFolderRequest is the body expected by PUT /api/folders/{id}.
+type RenameFolderRequest struct {
+	Name string `json:"name"`
+}
+
+// ChangeEmailRequest is the body expected by PUT /api/account/email.
+type ChangeEmailRequest struct {
+	NewEmail        string `json:"new_email"`
+	CurrentPassword string `json:"current_password"`
+}
+
+// ChangePasswordRequest is the body expected by PUT /api/account/password.
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// DeleteAccountRequest is the body expected by DELETE /api/account.
+type DeleteAccountRequest struct {
+	CurrentPassword string `json:"current_password"`
 }
 
 // FolderStatsResponse is returned by GET /api/folders.
@@ -254,7 +283,7 @@ func (h *Handler) PostRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), h.bcryptCost)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to process password"})
 		return
@@ -456,7 +485,7 @@ func (h *Handler) PostResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), h.bcryptCost)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to process password"})
 		return
@@ -579,6 +608,152 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// PutFolder handles PUT /api/folders/{id} — rename a folder.
+func (h *Handler) PutFolder(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+	folderID := parseFolderID(w, r)
+	if folderID == 0 {
+		return
+	}
+
+	var req RenameFolderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "name is required"})
+		return
+	}
+
+	if err := db.RenameWatchedPath(r.Context(), h.db, folderID, userID, strings.TrimSpace(req.Name)); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "folder not found"})
+		} else {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to rename folder"})
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// PutAccountEmail handles PUT /api/account/email — change email address.
+func (h *Handler) PutAccountEmail(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+
+	var req ChangeEmailRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+		return
+	}
+	if strings.TrimSpace(req.NewEmail) == "" || req.CurrentPassword == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "new_email and current_password are required"})
+		return
+	}
+	if _, err := mail.ParseAddress(req.NewEmail); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "new_email is not a valid email address"})
+		return
+	}
+
+	user, err := db.GetUserByID(r.Context(), h.db, userID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve user"})
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword)) != nil {
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "incorrect password"})
+		return
+	}
+
+	if err := db.UpdateUserEmail(r.Context(), h.db, userID, strings.TrimSpace(req.NewEmail)); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			writeJSON(w, http.StatusConflict, ErrorResponse{Error: "email already in use"})
+		} else {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to update email"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"email": strings.TrimSpace(req.NewEmail)})
+}
+
+// PutAccountPassword handles PUT /api/account/password — change password while logged in.
+func (h *Handler) PutAccountPassword(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+
+	var req ChangePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+		return
+	}
+	if req.CurrentPassword == "" || req.NewPassword == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "current_password and new_password are required"})
+		return
+	}
+
+	user, err := db.GetUserByID(r.Context(), h.db, userID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve user"})
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword)) != nil {
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "incorrect current password"})
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), h.bcryptCost)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to hash password"})
+		return
+	}
+	if err := db.UpdateUserPassword(r.Context(), h.db, userID, string(hash)); err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to update password"})
+		return
+	}
+
+	// Revoke all sessions so re-login is required on other devices.
+	if err := db.RevokeAllUserRefreshTokens(r.Context(), h.db, userID); err != nil {
+		log.Printf("warn: failed to revoke tokens after password change for user %d: %v", userID, err)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// DeleteAccount handles DELETE /api/account — permanently delete the account and all data.
+func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+
+	var req DeleteAccountRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+		return
+	}
+	if req.CurrentPassword == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "current_password is required"})
+		return
+	}
+
+	user, err := db.GetUserByID(r.Context(), h.db, userID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve user"})
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword)) != nil {
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "incorrect password"})
+		return
+	}
+
+	// Delete all backup objects from storage (best-effort).
+	if h.storage != nil {
+		if delErr := h.storage.DeleteUserObjects(r.Context(), userID); delErr != nil {
+			log.Printf("warn: failed to delete storage objects for user %d during account deletion: %v", userID, delErr)
+		}
+	}
+
+	if err := db.DeleteUser(r.Context(), h.db, userID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to delete account"})
+		return
+	}
+
+	clearAuthCookies(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 

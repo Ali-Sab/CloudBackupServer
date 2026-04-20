@@ -172,6 +172,7 @@ func TestFileEndpoints_RequireAuth(t *testing.T) {
 		{http.MethodGet, "/api/folders/"},
 		{http.MethodPost, "/api/folders/"},
 		{http.MethodDelete, "/api/folders/1/"},
+		{http.MethodPut, "/api/folders/1/"},
 		{http.MethodGet, "/api/folders/1/files"},
 		{http.MethodPut, "/api/folders/1/sync"},
 		{http.MethodGet, "/api/folders/1/backups"},
@@ -299,4 +300,28 @@ func TestSessionSvc_AccessTokenRoundtrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(7), claims.UserID)
 	assert.Equal(t, "test@example.com", claims.Email)
+}
+
+func TestAccountEndpoints_RequireAuth(t *testing.T) {
+	r := newTestRouter()
+
+	endpoints := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPut, "/api/account/email"},
+		{http.MethodPut, "/api/account/password"},
+		{http.MethodDelete, "/api/account"},
+	}
+
+	for _, ep := range endpoints {
+		req := httptest.NewRequest(ep.method, ep.path, nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "%s %s should require auth", ep.method, ep.path)
+
+		var errResp ErrorResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+		assert.NotEmpty(t, errResp.Error)
+	}
 }

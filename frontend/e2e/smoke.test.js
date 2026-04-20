@@ -535,3 +535,58 @@ test('T13: clicking the info button on a file shows the metadata modal', async (
   await page.keyboard.press('Escape');
   await expect(page.locator('#metadata-modal')).toHaveCount(0, { timeout: 3_000 });
 });
+
+// ---- T18: Account panel -------------------------------------------------------
+
+test('T18: account panel opens via the 👤 button and shows the current email', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password } = await registerFreshUser('account-panel');
+  await loginViaUI(page, email, password);
+  await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
+
+  // Click the Account nav button in the header.
+  await page.click('#account-nav-btn');
+
+  // Account panel must be visible and dashboard hidden.
+  await expect(page.locator('#account')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#dashboard')).toHaveClass(/hidden/);
+
+  // Current email must be displayed.
+  const emailEl = await page.locator('#account-current-email').textContent();
+  expect(emailEl.trim()).toBe(email);
+
+  // Close button returns to dashboard.
+  await page.click('#account-close-btn');
+  await expect(page.locator('#dashboard')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#account')).toHaveClass(/hidden/);
+});
+
+// ---- T19: Settings panel ------------------------------------------------------
+
+test('T19: settings panel opens via the ⚙️ button and shows appearance controls', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password } = await registerFreshUser('settings-panel');
+  await loginViaUI(page, email, password);
+  await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
+
+  // Click the Settings nav button.
+  await page.click('#settings-nav-btn');
+
+  // Settings panel must be visible.
+  await expect(page.locator('#settings')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#dashboard')).toHaveClass(/hidden/);
+
+  // Theme toggle buttons must be present.
+  await expect(page.locator('#theme-dark-btn')).toBeVisible();
+  await expect(page.locator('#theme-light-btn')).toBeVisible();
+
+  // Notifications toggle switch must be present (the checkbox itself is visually hidden by CSS).
+  await expect(page.locator('.settings-switch')).toBeVisible();
+
+  // Close button returns to dashboard.
+  await page.click('#settings-close-btn');
+  await expect(page.locator('#dashboard')).not.toHaveClass(/hidden/);
+  await expect(page.locator('#settings')).toHaveClass(/hidden/);
+});
