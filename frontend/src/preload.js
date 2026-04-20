@@ -77,6 +77,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFile: (rootPath, relativePath) =>
     ipcRenderer.invoke('open-file', { rootPath, relativePath }),
 
+  /**
+   * Return all file paths (relative, POSIX) under rootPath, recursively.
+   * @param {string} rootPath
+   * @returns {Promise<string[]>}
+   */
+  getAllFilePaths: (rootPath) =>
+    ipcRenderer.invoke('get-all-file-paths', { rootPath }),
+
+  /**
+   * Read up to 50 MB of a local file for in-app preview (bounded read, does not buffer the whole file).
+   * Returns { error: 'too_large', size } if the file exceeds the cap.
+   * @param {string} rootPath
+   * @param {string} relativePath
+   * @returns {Promise<{buffer: ArrayBuffer}|{error: string, size?: number}>}
+   */
+  readFilePreview: (rootPath, relativePath) =>
+    ipcRenderer.invoke('read-file-preview', { rootPath, relativePath }),
+
   // ---- Remember me (safeStorage keychain) ----
 
   /** Returns true if the OS keychain is available for safeStorage. */

@@ -249,6 +249,51 @@ ipcMain.handle('save-file', async (_event, { rootPath, relativePath, buffer }) =
   }
 });
 
+// Reads up to 2 MB of a local file for in-app preview.
+// Returns a flat array of POSIX relative paths for all files (not dirs) under rootPath.
+// Uses async fs.promises with an iterative queue to avoid blocking the main process.
+ipcMain.handle('get-all-file-paths', async (_event, { rootPath }) => {
+  const results = [];
+  const queue = [{ dir: path.resolve(rootPath), relDir: '' }];
+  while (queue.length > 0) {
+    const { dir, relDir } = queue.shift();
+    let entries;
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const relPath = relDir ? relDir + '/' + entry.name : entry.name;
+      if (entry.isDirectory()) queue.push({ dir: path.join(dir, entry.name), relDir: relPath });
+      else results.push(relPath);
+    }
+  }
+  return results;
+});
+
+// Returns { buffer: ArrayBuffer } (up to 50 MB) or { error: string, size? } if too large / unreadable.
+// Reads only up to MAX bytes using a bounded fd read — does not load the entire file for large files.
+ipcMain.handle('read-file-preview', (_event, { rootPath, relativePath }) => {
+  const absPath = path.resolve(rootPath, relativePath.split('/').join(path.sep));
+  const rel = path.relative(path.resolve(rootPath), absPath);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    return { error: 'Path is outside the watched directory' };
+  }
+  try {
+    const stat = fs.statSync(absPath);
+    const MAX = 50 * 1024 * 1024;
+    if (stat.size > MAX) return { error: 'too_large', size: stat.size };
+    const length = Math.min(stat.size, MAX);
+    const buf = Buffer.alloc(length);
+    const fd = fs.openSync(absPath, 'r');
+    try {
+      const bytesRead = fs.readSync(fd, buf, 0, length, 0);
+      return { buffer: buf.buffer.slice(buf.byteOffset, buf.byteOffset + bytesRead) };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
 // ---- IPC: remember-me (safeStorage keychain) ----
 
 // Resolved lazily after app.ready so app.getPath('userData') is safe to call.

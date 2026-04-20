@@ -9,7 +9,7 @@
 global.window = global.window || {};
 window._testMode = true;
 
-const { buildBackupSummary, formatDate, formatBackupStatusLabel, fileTypeIcon, filterTree, sortEntries } = require('../src/renderer/files');
+const { buildBackupSummary, formatDate, formatBackupStatusLabel, fileTypeIcon, previewType, filterTree, sortEntries } = require('../src/renderer/files');
 
 describe('buildBackupSummary', () => {
   test('returns null for empty results', () => {
@@ -121,6 +121,39 @@ describe('fileTypeIcon', () => {
   test('case-insensitive extension matching', () => {
     expect(fileTypeIcon('PHOTO.JPG')).toBe('🖼️');
     expect(fileTypeIcon('Script.JS')).toBe('💻');
+  });
+});
+
+describe('previewType', () => {
+  test.each([
+    ['photo.jpg',   'image'],
+    ['photo.JPG',   'image'],
+    ['image.png',   'image'],
+    ['icon.svg',    'image'],
+    ['banner.gif',  'image'],
+    ['readme.md',   'text'],
+    ['config.json', 'text'],
+    ['script.py',   'text'],
+    ['styles.css',  'text'],
+    ['data.go',     'text'],
+    ['notes.txt',   'text'],
+  ])('%s → %s', (filename, expected) => {
+    expect(previewType(filename)).toBe(expected);
+  });
+
+  test('document.pdf → pdf', () => {
+    expect(previewType('document.pdf')).toBe('pdf');
+    expect(previewType('REPORT.PDF')).toBe('pdf');
+  });
+
+  test.each([
+    ['video.mp4'],
+    ['archive.zip'],
+    ['spreadsheet.xlsx'],
+    ['binary.exe'],
+    ['noextension'],
+  ])('%s → null', (filename) => {
+    expect(previewType(filename)).toBeNull();
   });
 });
 
