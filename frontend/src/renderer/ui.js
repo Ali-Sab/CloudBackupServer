@@ -6,6 +6,8 @@
  *   window.UI.toast('Something failed', 'error')  // red error toast
  *
  * Toasts are appended to #toast-container, which this module creates if absent.
+ * #4 — Dismissable by click on ×
+ * #5 — Icon prefix (✓ / ✕)
  */
 
 'use strict';
@@ -36,19 +38,42 @@
     const container = getContainer();
     const el = document.createElement('div');
     el.className = 'toast toast-' + type;
-    el.textContent = message;
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+
+    const icon = document.createElement('span');
+    icon.className = 'toast-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = type === 'error' ? '✕' : '✓';
+
+    const text = document.createElement('span');
+    text.className = 'toast-text';
+    text.textContent = message;
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'toast-close';
+    closeBtn.setAttribute('aria-label', 'Dismiss');
+    closeBtn.textContent = '×';
+
+    el.appendChild(icon);
+    el.appendChild(text);
+    el.appendChild(closeBtn);
 
     container.appendChild(el);
+
+    function dismiss() {
+      el.classList.remove('toast-visible');
+      el.addEventListener('transitionend', function () { el.remove(); }, { once: true });
+    }
+
+    closeBtn.addEventListener('click', dismiss);
 
     // Trigger enter animation on next frame
     requestAnimationFrame(function () {
       el.classList.add('toast-visible');
     });
 
-    setTimeout(function () {
-      el.classList.remove('toast-visible');
-      el.addEventListener('transitionend', function () { el.remove(); }, { once: true });
-    }, durationMs);
+    setTimeout(dismiss, durationMs);
   }
 
   const UI = { toast };
