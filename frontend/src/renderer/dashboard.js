@@ -84,11 +84,11 @@ if (typeof module !== 'undefined') {
   // ---- Scaffold -----------------------------------------------------------
 
   function renderScaffold(el) {
-    el.className = 'dashboard';
+    el.className = 'app-view dashboard';
     el.innerHTML = `
       <div class="card">
-        <div class="dashboard-header">
-          <h2>My Folders</h2>
+        <div class="view-header dashboard-header">
+          <h2 class="view-title">My Folders</h2>
           <button id="add-folder-btn" title="Add folder (A)">+ Add Folder</button>
         </div>
         <div id="dashboard-summary" class="dashboard-summary hidden"></div>

@@ -354,18 +354,18 @@ if (typeof module !== 'undefined') {
   // ---- Scaffold -----------------------------------------------------------
 
   function renderScaffold(el) {
-    el.className = 'file-browser';
+    el.className = 'app-view file-browser';
     el.innerHTML = `
       <div class="card">
         <div class="backup-progress-track"><div id="backup-progress-fill" class="backup-progress-fill"></div></div>
-        <div class="file-browser-header">
+        <div class="view-header file-browser-header">
+          <button id="all-folders-btn" class="view-back-btn">← All Folders</button>
           <div id="breadcrumb" class="breadcrumb-area">
-            <h2>Local Folder</h2>
+            <h2 class="view-title">Local Folder</h2>
           </div>
           <div class="file-browser-actions">
             <span id="backup-progress" class="backup-progress" aria-live="polite"></span>
             <button id="backup-now-btn" disabled title="Backup now (B)">Backup Now</button>
-            <button id="all-folders-btn">← All Folders</button>
           </div>
         </div>
         <div class="file-browser-controls">
@@ -717,6 +717,7 @@ if (typeof module !== 'undefined') {
 
     if (!currentPath) {
       const h2 = document.createElement('h2');
+      h2.className = 'view-title';
       h2.textContent = 'Local Folder';
       el.appendChild(h2);
       return;
@@ -738,7 +739,7 @@ if (typeof module !== 'undefined') {
     }
 
     const rootBtn = document.createElement('button');
-    rootBtn.className = 'breadcrumb-seg' + (viewStack.length === 0 ? ' active' : '');
+    rootBtn.className = 'breadcrumb-seg breadcrumb-root' + (viewStack.length === 0 ? ' active' : '');
     rootBtn.setAttribute('title', currentPath);
     rootBtn.innerHTML = '📁 ' + truncateName(rootName, 22);
     rootBtn.addEventListener('click', function () { navigateTo(0); });
@@ -1263,48 +1264,88 @@ if (typeof module !== 'undefined') {
     }
     body.appendChild(list);
 
-    // #27 — Backup history section (files only, uses already-loaded backupRecords)
-    if (!entry.isDirectory) {
+    // Version history section (files only) — loads from API asynchronously
+    if (!entry.isDirectory && currentFolderId) {
       const histSection = document.createElement('div');
       histSection.className = 'backup-history-section';
 
       const histHeading = document.createElement('div');
       histHeading.className = 'backup-history-heading';
-      histHeading.textContent = 'Backup history';
+      histHeading.textContent = 'Version history';
       histSection.appendChild(histHeading);
 
-      // backupRecords is keyed by relativePath — collect all versions for this file
-      // The current API stores one record per file. If there are multiple versions
-      // (e.g. from repeated backups), they would be separate entries. Here we
-      // collect the single record for this path from the already-loaded map.
-      const rec = backupRecords.get(entry.relativePath);
-      const histEntries = rec ? [rec] : [];
+      const loadingEl = document.createElement('div');
+      loadingEl.className = 'backup-history-empty';
+      loadingEl.textContent = 'Loading…';
+      histSection.appendChild(loadingEl);
 
-      if (histEntries.length === 0) {
-        const emptyEl = document.createElement('div');
-        emptyEl.className = 'backup-history-empty';
-        emptyEl.textContent = 'No backup history';
-        histSection.appendChild(emptyEl);
-      } else {
+      body.appendChild(histSection);
+
+      window.API.getFileVersions(currentFolderId, entry.relativePath).then(function (resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.json();
+      }).then(function (data) {
+        loadingEl.remove();
+        const versions = data.versions || [];
+        if (versions.length === 0) {
+          const emptyEl = document.createElement('div');
+          emptyEl.className = 'backup-history-empty';
+          emptyEl.textContent = 'No versions yet';
+          histSection.appendChild(emptyEl);
+          return;
+        }
         const ul = document.createElement('ul');
         ul.className = 'backup-history-list';
-        for (const h of histEntries) {
+        versions.forEach(function (v) {
           const li = document.createElement('li');
           li.className = 'backup-history-item';
+
+          const verBadge = document.createElement('span');
+          verBadge.className = 'version-badge';
+          verBadge.textContent = 'v' + v.version;
+
           const dateEl = document.createElement('span');
           dateEl.className = 'backup-history-item-date';
-          dateEl.textContent = h.last_backed_up_at
-            ? formatDate(new Date(h.last_backed_up_at).getTime())
-            : '—';
+          dateEl.textContent = formatDate(new Date(v.backed_up_at).getTime());
+
           const sizeEl = document.createElement('span');
-          sizeEl.textContent = formatSize(h.size || 0);
+          sizeEl.textContent = formatSize(v.size || 0);
+
+          const restoreBtn = document.createElement('button');
+          restoreBtn.className = 'version-restore-btn';
+          restoreBtn.textContent = '↓ Restore';
+          restoreBtn.setAttribute('title', 'Download this version to your local folder');
+          restoreBtn.addEventListener('click', function () {
+            restoreBtn.disabled = true;
+            restoreBtn.textContent = 'Restoring…';
+            window.API.downloadFileVersion(currentFolderId, v.id).then(function (r) {
+              if (!r.ok) throw new Error('HTTP ' + r.status);
+              return r.arrayBuffer();
+            }).then(function (buffer) {
+              return window.electronAPI.saveFile(currentPath, entry.relativePath, buffer);
+            }).then(function (result) {
+              if (result && result.error) throw new Error(result.error);
+              restoreBtn.textContent = '✓ Restored';
+              window.UI.toast('Restored ' + entry.name + ' to v' + v.version, 'success');
+              uploadStatus.set(entry.relativePath, 'outdated');
+              renderView();
+            }).catch(function (e) {
+              restoreBtn.disabled = false;
+              restoreBtn.textContent = '↓ Restore';
+              window.UI.toast('Restore failed: ' + e.message, 'error');
+            });
+          });
+
+          li.appendChild(verBadge);
           li.appendChild(dateEl);
           li.appendChild(sizeEl);
+          li.appendChild(restoreBtn);
           ul.appendChild(li);
-        }
+        });
         histSection.appendChild(ul);
-      }
-      body.appendChild(histSection);
+      }).catch(function () {
+        loadingEl.textContent = 'Could not load versions';
+      });
     }
 
     card.appendChild(header);
@@ -1571,6 +1612,8 @@ if (typeof module !== 'undefined') {
     openPreviewModal(entry, { folderId: folderId, rootPath: '' });
   }
 
-  window.Files = { show, hide, previewCloudFile, previewType };
+  window.Files = { show, hide, previewCloudFile, previewType,
+    getCurrent: function () { return { folderId: currentFolderId, folderPath: currentPath }; },
+  };
 
 })();

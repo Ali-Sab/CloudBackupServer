@@ -31,7 +31,7 @@ info:
     and returns a 404 when the email is not found (anti-enumeration is disabled).
     Both behaviours will be reversed before production: the token will be delivered by email
     and the response will look identical regardless of whether the email exists.
-  version: 0.3.1
+  version: 0.3.3
   license:
     name: GNU General Public License v3.0
     url: https://www.gnu.org/licenses/gpl-3.0.html
@@ -475,6 +475,65 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/folders/{folderID}/versions:
+    get:
+      summary: List all preserved versions of a file
+      operationId: getFileVersions
+      tags: [Versions]
+      security:
+        - CookieAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: folderID
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+          description: POSIX relative path of the file (e.g. "photos/img.jpg")
+      responses:
+        "200":
+          description: List of versions, newest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileVersionsResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/folders/{folderID}/versions/{versionID}:
+    get:
+      summary: Download a specific file version
+      operationId: getFileVersionDownload
+      tags: [Versions]
+      security:
+        - CookieAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: folderID
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: versionID
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Raw file bytes for the requested version
+          headers:
+            X-Backup-Version:  { schema: { type: integer } }
+            X-Checksum-SHA256: { schema: { type: string } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/folders/{folderID}/backup/{relative_path}:
     parameters:
       - name: folderID
@@ -647,6 +706,49 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /api/history:
+    get:
+      summary: Get backup activity history
+      description: |
+        Returns file backup records sorted by `backed_up_at` DESC, enriched with the
+        parent folder name and path. Supports filtering by folder and pagination.
+      operationId: getBackupHistory
+      tags: [History]
+      security:
+        - CookieAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: folder_id
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Filter to a specific folder (omit for all folders)
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+          description: Number of items to return
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+          description: Number of items to skip (for pagination)
+      responses:
+        "200":
+          description: Paginated history items
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
 components:
   securitySchemes:
     CookieAuth:
@@ -664,6 +766,54 @@ components:
         Pass the `access_token` value from the login response body as `Authorization: Bearer <token>`.
 
   schemas:
+    FileVersion:
+      type: object
+      required: [id, version, size, checksum_sha256, object_key, backed_up_at]
+      properties:
+        id:             { type: integer, format: int64 }
+        version:        { type: integer }
+        size:           { type: integer, format: int64 }
+        checksum_sha256: { type: string }
+        object_key:     { type: string }
+        backed_up_at:   { type: string, format: date-time }
+
+    FileVersionsResponse:
+      type: object
+      required: [versions]
+      properties:
+        versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileVersion"
+
+    HistoryItem:
+      type: object
+      required: [id, user_id, watched_path_id, relative_path, size, checksum_sha256, object_key, backed_up_at, version, folder_name, folder_path]
+      properties:
+        id:          { type: integer, format: int64 }
+        user_id:     { type: integer, format: int64 }
+        watched_path_id: { type: integer, format: int64 }
+        relative_path:   { type: string, example: "photos/2024/img.jpg" }
+        size:        { type: integer, format: int64 }
+        checksum_sha256: { type: string }
+        object_key:  { type: string }
+        backed_up_at: { type: string, format: date-time }
+        version:     { type: integer }
+        folder_name: { type: string }
+        folder_path: { type: string }
+
+    HistoryResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/HistoryItem"
+        total:  { type: integer }
+        limit:  { type: integer }
+        offset: { type: integer }
+
     HealthResponse:
       type: object
       required: [status, version]

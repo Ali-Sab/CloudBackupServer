@@ -136,6 +136,39 @@
       const encoded = relativePath.split('/').map(encodeURIComponent).join('/');
       return APIClient.request('/api/folders/' + id + '/backup/' + encoded);
     },
+
+    /**
+     * List all preserved versions for a specific file.
+     * @param {number} folderId
+     * @param {string} relativePath
+     */
+    getFileVersions(folderId, relativePath) {
+      const encoded = encodeURIComponent(relativePath);
+      return APIClient.request('/api/folders/' + folderId + '/versions?path=' + encoded);
+    },
+
+    /**
+     * Download a specific version by its version-row ID.
+     * Returns a raw Response with the binary body.
+     * @param {number} folderId
+     * @param {number} versionId
+     */
+    downloadFileVersion(folderId, versionId) {
+      return APIClient.request('/api/folders/' + folderId + '/versions/' + versionId);
+    },
+
+    /**
+     * Fetch paginated backup history across all folders, or scoped to one folder.
+     * @param {{ folderId?: number, limit?: number, offset?: number }} opts
+     */
+    getBackupHistory(opts) {
+      const params = new URLSearchParams();
+      if (opts && opts.folderId) params.set('folder_id', opts.folderId);
+      if (opts && opts.limit)    params.set('limit',     opts.limit);
+      if (opts && opts.offset)   params.set('offset',    opts.offset);
+      const qs = params.toString();
+      return APIClient.request('/api/history' + (qs ? '?' + qs : ''));
+    },
   };
 
   if (typeof module !== 'undefined') {

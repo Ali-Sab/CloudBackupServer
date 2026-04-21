@@ -828,6 +828,96 @@ func (h *Handler) PutSyncFiles(w http.ResponseWriter, r *http.Request) {
 
 // ---- Backup handlers ----
 
+// HistoryResponse is returned by GET /api/history.
+type HistoryResponse struct {
+	Items  []db.HistoryItem `json:"items"`
+	Limit  int              `json:"limit"`
+	Offset int              `json:"offset"`
+}
+
+// GetBackupHistory handles GET /api/history.
+// Query params: folder_id (int, optional), limit (int, default 50, max 200), offset (int, default 0).
+func (h *Handler) GetBackupHistory(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+
+	folderID, _ := strconv.ParseInt(r.URL.Query().Get("folder_id"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	items, err := db.GetBackupHistory(r.Context(), h.db, userID, folderID, limit, offset)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to load history"})
+		return
+	}
+	writeJSON(w, http.StatusOK, HistoryResponse{Items: items, Limit: limit, Offset: offset})
+}
+
+// FileVersionsResponse is returned by GET /api/folders/{folderID}/versions.
+type FileVersionsResponse struct {
+	Versions []db.FileVersion `json:"versions"`
+}
+
+// GetFileVersions handles GET /api/folders/{folderID}/versions?path=relative_path.
+func (h *Handler) GetFileVersions(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+	wp := h.requireFolder(w, r, userID)
+	if wp == nil {
+		return
+	}
+	relativePath := r.URL.Query().Get("path")
+	if relativePath == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "path query parameter is required"})
+		return
+	}
+	versions, err := db.GetFileVersions(r.Context(), h.db, wp.ID, relativePath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to load versions"})
+		return
+	}
+	writeJSON(w, http.StatusOK, FileVersionsResponse{Versions: versions})
+}
+
+// GetFileVersionDownload handles GET /api/folders/{folderID}/versions/{versionID}.
+// Streams the specific version's object from storage back to the client.
+func (h *Handler) GetFileVersionDownload(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r.Context())
+	wp := h.requireFolder(w, r, userID)
+	if wp == nil {
+		return
+	}
+	versionID, err := strconv.ParseInt(chi.URLParam(r, "versionID"), 10, 64)
+	if err != nil || versionID <= 0 {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid versionID"})
+		return
+	}
+	v, err := db.GetFileVersionByID(r.Context(), h.db, versionID, userID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "version not found"})
+		return
+	}
+	if v.WatchedPathID != wp.ID {
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "version not found"})
+		return
+	}
+	obj, _, err := h.storage.GetObject(r.Context(), v.ObjectKey)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to retrieve object"})
+		return
+	}
+	defer obj.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Backup-Version", strconv.Itoa(v.Version))
+	w.Header().Set("X-Checksum-SHA256", v.ChecksumSHA256)
+	w.Header().Set("Content-Length", strconv.FormatInt(v.Size, 10))
+	io.Copy(w, obj) //nolint:errcheck
+}
+
 // GetFileBackups handles GET /api/folders/{folderID}/backups.
 func (h *Handler) GetFileBackups(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())

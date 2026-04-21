@@ -36,9 +36,9 @@
 
     el.innerHTML = `
       <div class="settings-panel">
-        <div class="settings-panel-header">
-          <h2>Settings</h2>
-          <button id="settings-close-btn" class="panel-close-btn" aria-label="Close settings">✕</button>
+        <div class="view-header settings-panel-header">
+          <button id="settings-close-btn" class="view-back-btn" aria-label="Close settings">← Back</button>
+          <h2 class="view-title">Settings</h2>
         </div>
 
         <section class="settings-section">
