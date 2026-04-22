@@ -55,6 +55,8 @@ func newRouter(h *Handler) *chi.Mux {
 				r.Get("/backups", h.GetFileBackups)
 				r.Put("/backup/*", h.PutFileBackup)
 				r.Get("/backup/*", h.GetFileBackup)
+				r.Get("/versions", h.GetFileVersions)
+				r.Get("/versions/{versionID}", h.GetFileVersionDownload)
 			})
 		})
 
@@ -64,6 +66,8 @@ func newRouter(h *Handler) *chi.Mux {
 			r.Put("/password", h.PutAccountPassword)
 			r.Delete("/", h.DeleteAccount)
 		})
+
+		r.With(h.requireAuth).Get("/history", h.GetBackupHistory)
 	})
 
 	return r

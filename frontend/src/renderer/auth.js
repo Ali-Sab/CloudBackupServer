@@ -454,7 +454,13 @@
     const _staticLogoutBtn = document.getElementById('logout-btn');
     if (_staticLogoutBtn) _staticLogoutBtn.addEventListener('click', logout);
 
-    // Wire up Account and Settings nav buttons.
+    // Wire up logo → dashboard, History, Account, and Settings nav buttons.
+    document.getElementById('logo-btn').addEventListener('click', function () {
+      window.Dashboard.show();
+    });
+    document.getElementById('history-nav-btn').addEventListener('click', function () {
+      window.History.show();
+    });
     document.getElementById('account-nav-btn').addEventListener('click', function () {
       const email = document.getElementById('header-email').textContent;
       window.Account.show(email);

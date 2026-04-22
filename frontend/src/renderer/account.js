@@ -58,9 +58,9 @@
     const el = document.getElementById('account');
     el.innerHTML = `
       <div class="account-panel">
-        <div class="account-panel-header">
-          <h2>Account</h2>
-          <button id="account-close-btn" class="panel-close-btn" aria-label="Close account panel">✕</button>
+        <div class="view-header account-panel-header">
+          <button id="account-close-btn" class="view-back-btn" aria-label="Close account panel">← Back</button>
+          <h2 class="view-title">Account</h2>
         </div>
 
         <section class="account-section">

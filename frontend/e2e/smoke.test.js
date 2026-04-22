@@ -831,3 +831,52 @@ test('T27: closing the preview modal with × removes it', async () => {
   await page.locator('#preview-modal .modal-close').click();
   await expect(page.locator('#preview-modal')).toHaveCount(0, { timeout: 3_000 });
 });
+
+// ---- T28–T30: Activity log (history) -----------------------------------------
+
+// T28: Clicking the 📋 nav button shows the activity log screen.
+test('T28: history nav button shows the activity log screen', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password } = await registerFreshUser('history-open');
+  await loginViaUI(page, email, password);
+
+  await page.click('#history-nav-btn');
+  await expect(page.locator('.history-card')).toBeVisible({ timeout: 5_000 });
+  await expect(page.locator('.history-title')).toHaveText('Activity Log');
+});
+
+// T29: The ← Back button on the activity log returns to the dashboard.
+test('T29: history back button returns to dashboard', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password } = await registerFreshUser('history-back');
+  await loginViaUI(page, email, password);
+
+  await page.click('#history-nav-btn');
+  await expect(page.locator('.history-card')).toBeVisible({ timeout: 5_000 });
+
+  await page.click('#history-back-btn');
+  await expect(page.locator('#dashboard')).not.toHaveClass(/hidden/, { timeout: 3_000 });
+  await expect(page.locator('.history-card')).toHaveCount(0);
+});
+
+// T30: After a backup, the activity log shows a history row for the backed-up file.
+test('T30: activity log shows a row after a file is backed up', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { email, password, token } = await registerFreshUser('history-row');
+  await httpPost('/api/folders', { path: tmpDir }, token);
+
+  await loginViaUI(page, email, password);
+  await openFileBrowser(page, token);
+
+  // Trigger a backup so there is at least one history row.
+  await page.click('#backup-now-btn');
+  await page.waitForTimeout(2_000);
+
+  await page.click('#history-nav-btn');
+  await expect(page.locator('.history-card')).toBeVisible({ timeout: 5_000 });
+  // At least one history-item row should be visible.
+  await expect(page.locator('.history-item').first()).toBeVisible({ timeout: 5_000 });
+});

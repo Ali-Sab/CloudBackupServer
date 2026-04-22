@@ -410,11 +410,17 @@ func GetWatchedFiles(ctx context.Context, pool *pgxpool.Pool, pathID int64) ([]m
 
 // ---- File backups ----
 
-// UpsertFileBackup inserts or updates a backup record for a single file.
-// The unique constraint is (watched_path_id, relative_path) — safe to call repeatedly.
-// On conflict the record is updated and Version is incremented by 1.
+// UpsertFileBackup inserts or updates the current backup record for a file, then
+// appends an immutable row to file_backup_versions so every version is preserved
+// and restorable. Both writes run in a single transaction.
 func UpsertFileBackup(ctx context.Context, pool *pgxpool.Pool, b *models.FileBackup) error {
-	err := pool.QueryRow(ctx,
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning upsert transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	err = tx.QueryRow(ctx,
 		`INSERT INTO file_backups (user_id, watched_path_id, relative_path, size, checksum_sha256, object_key)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (watched_path_id, relative_path) DO UPDATE
@@ -429,7 +435,77 @@ func UpsertFileBackup(ctx context.Context, pool *pgxpool.Pool, b *models.FileBac
 	if err != nil {
 		return fmt.Errorf("upserting file backup: %w", err)
 	}
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO file_backup_versions
+		    (user_id, watched_path_id, relative_path, version, size, checksum_sha256, object_key, backed_up_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 ON CONFLICT (watched_path_id, relative_path, version) DO NOTHING`,
+		b.UserID, b.WatchedPathID, b.RelativePath, b.Version,
+		b.Size, b.ChecksumSHA256, b.ObjectKey, b.BackedUpAt,
+	)
+	if err != nil {
+		return fmt.Errorf("inserting file backup version: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing upsert transaction: %w", err)
+	}
 	return nil
+}
+
+// FileVersion is a single restorable version of a backed-up file.
+type FileVersion struct {
+	ID             int64     `json:"id"`
+	WatchedPathID  int64     `json:"-"`
+	Version        int       `json:"version"`
+	Size           int64     `json:"size"`
+	ChecksumSHA256 string    `json:"checksum_sha256"`
+	ObjectKey      string    `json:"object_key"`
+	BackedUpAt     time.Time `json:"backed_up_at"`
+}
+
+// GetFileVersions returns all preserved versions for a file, newest first.
+func GetFileVersions(ctx context.Context, pool *pgxpool.Pool, watchedPathID int64, relativePath string) ([]FileVersion, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT id, version, size, checksum_sha256, object_key, backed_up_at
+		 FROM file_backup_versions
+		 WHERE watched_path_id = $1 AND relative_path = $2
+		 ORDER BY version DESC`,
+		watchedPathID, relativePath,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying file versions: %w", err)
+	}
+	defer rows.Close()
+
+	var versions []FileVersion
+	for rows.Next() {
+		var v FileVersion
+		if err := rows.Scan(&v.ID, &v.Version, &v.Size, &v.ChecksumSHA256, &v.ObjectKey, &v.BackedUpAt); err != nil {
+			return nil, fmt.Errorf("scanning file version: %w", err)
+		}
+		versions = append(versions, v)
+	}
+	if versions == nil {
+		versions = []FileVersion{}
+	}
+	return versions, rows.Err()
+}
+
+// GetFileVersionByID returns a single version row by its primary key, scoped to userID.
+func GetFileVersionByID(ctx context.Context, pool *pgxpool.Pool, versionID, userID int64) (*FileVersion, error) {
+	v := &FileVersion{}
+	err := pool.QueryRow(ctx,
+		`SELECT id, watched_path_id, version, size, checksum_sha256, object_key, backed_up_at
+		 FROM file_backup_versions
+		 WHERE id = $1 AND user_id = $2`,
+		versionID, userID,
+	).Scan(&v.ID, &v.WatchedPathID, &v.Version, &v.Size, &v.ChecksumSHA256, &v.ObjectKey, &v.BackedUpAt)
+	if err != nil {
+		return nil, fmt.Errorf("getting file version: %w", err)
+	}
+	return v, nil
 }
 
 // GetFileBackup returns the backup record for a specific watched path + relative path.
@@ -445,6 +521,69 @@ func GetFileBackup(ctx context.Context, pool *pgxpool.Pool, watchedPathID int64,
 		return nil, fmt.Errorf("getting file backup: %w", err)
 	}
 	return b, nil
+}
+
+// HistoryItem is a backup record enriched with its parent folder name and path,
+// returned by GetBackupHistory for the activity log screen.
+type HistoryItem struct {
+	models.FileBackup
+	FolderName string `json:"folder_name"`
+	FolderPath string `json:"folder_path"`
+}
+
+// GetBackupHistory returns up to `limit` version events for `userID` sorted by
+// backed_up_at DESC, enriched with the parent folder name and path.
+// Queries file_backup_versions so every re-backup appears as a separate event.
+// Pass folderID = 0 to query across all folders.
+func GetBackupHistory(ctx context.Context, pool *pgxpool.Pool, userID, folderID int64, limit, offset int) ([]HistoryItem, error) {
+	var rows pgx.Rows
+	var err error
+	if folderID > 0 {
+		rows, err = pool.Query(ctx,
+			`SELECT fv.id, fv.user_id, fv.watched_path_id, fv.relative_path,
+			        fv.size, fv.checksum_sha256, fv.object_key, fv.backed_up_at, fv.version,
+			        wp.name, wp.path
+			 FROM file_backup_versions fv
+			 JOIN watched_paths wp ON wp.id = fv.watched_path_id
+			 WHERE fv.user_id = $1 AND fv.watched_path_id = $2
+			 ORDER BY fv.backed_up_at DESC
+			 LIMIT $3 OFFSET $4`,
+			userID, folderID, limit, offset,
+		)
+	} else {
+		rows, err = pool.Query(ctx,
+			`SELECT fv.id, fv.user_id, fv.watched_path_id, fv.relative_path,
+			        fv.size, fv.checksum_sha256, fv.object_key, fv.backed_up_at, fv.version,
+			        wp.name, wp.path
+			 FROM file_backup_versions fv
+			 JOIN watched_paths wp ON wp.id = fv.watched_path_id
+			 WHERE fv.user_id = $1
+			 ORDER BY fv.backed_up_at DESC
+			 LIMIT $2 OFFSET $3`,
+			userID, limit, offset,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying backup history: %w", err)
+	}
+	defer rows.Close()
+
+	var items []HistoryItem
+	for rows.Next() {
+		var it HistoryItem
+		if err := rows.Scan(
+			&it.ID, &it.UserID, &it.WatchedPathID, &it.RelativePath,
+			&it.Size, &it.ChecksumSHA256, &it.ObjectKey, &it.BackedUpAt, &it.Version,
+			&it.FolderName, &it.FolderPath,
+		); err != nil {
+			return nil, fmt.Errorf("scanning history item: %w", err)
+		}
+		items = append(items, it)
+	}
+	if items == nil {
+		items = []HistoryItem{}
+	}
+	return items, rows.Err()
 }
 
 // GetFileBackupsByWatchedPathID returns all backup records for a watched path, ordered by relative_path.
