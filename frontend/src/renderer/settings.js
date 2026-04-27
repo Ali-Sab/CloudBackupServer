@@ -143,17 +143,19 @@
 
   function show() {
     _returnToFiles = !document.getElementById('file-browser').classList.contains('hidden');
+    ['dashboard', 'file-browser', 'history', 'account'].forEach(function (id) {
+      document.getElementById(id).classList.add('hidden');
+    });
     const el = document.getElementById('settings');
     render();
     el.classList.remove('hidden');
-    document.getElementById('dashboard').classList.add('hidden');
-    document.getElementById('file-browser').classList.add('hidden');
   }
 
   function hide() {
     document.getElementById('settings').classList.add('hidden');
     if (_returnToFiles) {
-      window.FileBrowser.show();
+      const cur = window.Files.getCurrent();
+      window.Files.show(cur.folderId, cur.folderPath);
     } else {
       window.Dashboard.show();
     }

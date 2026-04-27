@@ -290,17 +290,19 @@
   function show(email) {
     _currentEmail = email || _currentEmail;
     _returnToFiles = !document.getElementById('file-browser').classList.contains('hidden');
+    ['dashboard', 'file-browser', 'history', 'settings'].forEach(function (id) {
+      document.getElementById(id).classList.add('hidden');
+    });
     const el = document.getElementById('account');
     render(_currentEmail);
     el.classList.remove('hidden');
-    document.getElementById('dashboard').classList.add('hidden');
-    document.getElementById('file-browser').classList.add('hidden');
   }
 
   function hide() {
     document.getElementById('account').classList.add('hidden');
     if (_returnToFiles) {
-      window.FileBrowser.show();
+      const cur = window.Files.getCurrent();
+      window.Files.show(cur.folderId, cur.folderPath);
     } else {
       window.Dashboard.show();
     }
