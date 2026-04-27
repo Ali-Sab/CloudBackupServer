@@ -127,7 +127,7 @@ async function loginViaUI(page, email, password) {
   await page.fill('#email',    email);
   await page.fill('#password', password);
   await page.click('#login-form button[type="submit"]');
-  await page.waitForSelector('#logout-btn', { timeout: 10_000 });
+  await page.waitForSelector('#header-avatar', { timeout: 10_000 });
 }
 
 // ---- Per-test fixtures -------------------------------------------------------
@@ -341,16 +341,18 @@ test('T9: logout clears session and returns to login form', async () => {
 
   const { email, password } = await registerFreshUser('logout');
   await loginViaUI(page, email, password);
-  await page.waitForSelector('#logout-btn', { timeout: 10_000 });
+  await page.waitForSelector('#header-avatar', { timeout: 10_000 });
 
-  await page.click('#logout-btn');
+  // Click avatar to open dropdown, then click Sign Out.
+  await page.click('#header-avatar');
+  await page.click('#avatar-dropdown-signout');
 
   // Login form reappears; dashboard and file browser are hidden.
   await page.waitForSelector('#login-form', { timeout: 10_000 });
   await expect(page.locator('#login-form')).toBeVisible();
   await expect(page.locator('#dashboard')).toHaveClass(/hidden/, { timeout: 5_000 });
   await expect(page.locator('#file-browser')).toHaveClass(/hidden/, { timeout: 5_000 });
-  await expect(page.locator('#logout-btn')).not.toBeVisible();
+  await expect(page.locator('#header-user')).toHaveClass(/hidden/);
 });
 
 // ---- T10: clicking a file name opens it with the OS default app -------------
@@ -422,7 +424,7 @@ test('T12: logging in with remember-me checked auto-logs in on next launch', asy
     await page.fill('#password', password);
     await page.check('#remember-me');
     await page.click('#login-form button[type="submit"]');
-    await page.waitForSelector('#logout-btn', { timeout: 10_000 });
+    await page.waitForSelector('#header-avatar', { timeout: 10_000 });
 
     // Close and relaunch with the same userData — expect auto-login.
     await app.close();
@@ -431,7 +433,7 @@ test('T12: logging in with remember-me checked auto-logs in on next launch', asy
     await page.waitForLoadState('domcontentloaded');
 
     // Should land on the dashboard without seeing the login form.
-    await page.waitForSelector('#logout-btn', { timeout: 12_000 });
+    await page.waitForSelector('#header-avatar', { timeout: 12_000 });
     await expect(page.locator('#login-form')).toHaveCount(0);
   } finally {
     try { fs.rmSync(userDataDir, { recursive: true, force: true }); } catch {}
@@ -582,8 +584,9 @@ test('T18: account panel opens via the 👤 button and shows the current email',
   await loginViaUI(page, email, password);
   await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
 
-  // Click the Account nav button in the header.
-  await page.click('#account-nav-btn');
+  // Click the avatar button in the header to open dropdown, then click Account.
+  await page.click('#header-avatar');
+  await page.click('#avatar-dropdown-account');
 
   // Account panel must be visible and dashboard hidden.
   await expect(page.locator('#account')).not.toHaveClass(/hidden/);
@@ -608,8 +611,9 @@ test('T19: settings panel opens via the ⚙️ button and shows appearance contr
   await loginViaUI(page, email, password);
   await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8_000 });
 
-  // Click the Settings nav button.
-  await page.click('#settings-nav-btn');
+  // Click the avatar button in the header to open dropdown, then click Settings.
+  await page.click('#header-avatar');
+  await page.click('#avatar-dropdown-settings');
 
   // Settings panel must be visible.
   await expect(page.locator('#settings')).not.toHaveClass(/hidden/);

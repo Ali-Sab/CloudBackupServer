@@ -19,13 +19,17 @@
   <div id="app">
     <header class="app-header">
       <h1><button id="logo-btn">Cloud Backup</button></h1>
+      <button id="theme-toggle-btn" class="header-icon-btn" title="Toggle dark/light mode" aria-label="Toggle dark/light mode">🌙</button>
       <div id="header-user" class="header-user hidden">
-        <div id="header-avatar" class="header-avatar"></div>
-        <span id="header-email" class="header-email"></span>
-        <button id="history-nav-btn" class="header-icon-btn" title="Activity log" aria-label="Activity log">📋</button>
-        <button id="account-nav-btn" class="header-icon-btn" title="Account" aria-label="Account settings">👤</button>
-        <button id="settings-nav-btn" class="header-icon-btn" title="Settings" aria-label="Settings">⚙️</button>
-        <button id="logout-btn" class="header-signout">Sign Out</button>
+        <button id="history-nav-btn" class="header-activity-btn" title="Activity log" aria-label="Activity log">📋 Activity</button>
+        <div class="header-avatar-container">
+          <button id="header-avatar" class="header-avatar" aria-label="Profile menu" aria-haspopup="true" aria-expanded="false" aria-controls="avatar-dropdown" data-email=""></button>
+          <div id="avatar-dropdown" class="avatar-dropdown hidden">
+            <button id="avatar-dropdown-account" class="avatar-dropdown-item">👤 Account</button>
+            <button id="avatar-dropdown-settings" class="avatar-dropdown-item">⚙️ Settings</button>
+            <button id="avatar-dropdown-signout" class="avatar-dropdown-item">Sign Out</button>
+          </div>
+        </div>
       </div>
     </header>
 

@@ -121,10 +121,7 @@
         .toUpperCase() || '?';
 
       const avatar = document.getElementById('header-avatar');
-      if (avatar) { avatar.textContent = initials; avatar.setAttribute('title', email); }
-
-      const emailEl = document.getElementById('header-email');
-      if (emailEl) emailEl.textContent = email;
+      if (avatar) { avatar.textContent = initials; avatar.setAttribute('data-email', email); }
 
       const slot = document.getElementById('header-user');
       if (slot) slot.classList.remove('hidden');
@@ -450,24 +447,42 @@
 
     // -- Expose public interface ---------------------------------------------
 
-    // Wire up the static logout button (always present in index.html).
-    const _staticLogoutBtn = document.getElementById('logout-btn');
-    if (_staticLogoutBtn) _staticLogoutBtn.addEventListener('click', logout);
-
-    // Wire up logo → dashboard, History, Account, and Settings nav buttons.
+    // Wire up logo → dashboard and History.
     document.getElementById('logo-btn').addEventListener('click', function () {
       window.Dashboard.show();
     });
     document.getElementById('history-nav-btn').addEventListener('click', function () {
       window.History.show();
     });
-    document.getElementById('account-nav-btn').addEventListener('click', function () {
-      const email = document.getElementById('header-email').textContent;
-      window.Account.show(email);
-    });
-    document.getElementById('settings-nav-btn').addEventListener('click', function () {
-      window.Settings.show();
-    });
+
+    // Avatar dropdown toggle with aria-expanded state
+    const avatarBtn = document.getElementById('header-avatar');
+    const avatarDropdown = document.getElementById('avatar-dropdown');
+    if (avatarBtn && avatarDropdown) {
+      function setAvatarDropdownOpen(isOpen) {
+        avatarDropdown.classList.toggle('hidden', !isOpen);
+        avatarBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      }
+
+      avatarBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        setAvatarDropdownOpen(avatarDropdown.classList.contains('hidden'));
+      });
+      document.getElementById('avatar-dropdown-account').addEventListener('click', function () {
+        const email = avatarBtn.getAttribute('data-email');
+        window.Account.show(email);
+        setAvatarDropdownOpen(false);
+      });
+      document.getElementById('avatar-dropdown-settings').addEventListener('click', function () {
+        window.Settings.show();
+        setAvatarDropdownOpen(false);
+      });
+      document.getElementById('avatar-dropdown-signout').addEventListener('click', logout);
+      // Close dropdown when clicking elsewhere
+      document.addEventListener('click', function () {
+        setAvatarDropdownOpen(false);
+      });
+    }
 
     // -- #23 Theme toggle ----------------------------------------------------
 
@@ -478,18 +493,10 @@
         document.documentElement.setAttribute('data-theme', 'light');
       }
 
-      // Inject toggle button into the header, before #header-user
-      const headerUser = document.getElementById('header-user');
-      if (headerUser) {
-        const btn = document.createElement('button');
-        btn.id = 'theme-toggle-btn';
-        btn.className = 'theme-toggle-btn';
-        btn.setAttribute('type', 'button');
-        btn.setAttribute('aria-label', 'Toggle light/dark theme');
+      // Wire up existing theme toggle button in header
+      const btn = document.getElementById('theme-toggle-btn');
+      if (btn) {
         btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☀️' : '🌙';
-        // Insert before header-user in the header
-        headerUser.parentNode.insertBefore(btn, headerUser);
-
         btn.addEventListener('click', function () {
           const isLight = document.documentElement.getAttribute('data-theme') === 'light';
           if (isLight) {

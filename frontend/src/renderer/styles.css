@@ -620,8 +620,52 @@ button.link-btn:hover { color: var(--color-primary); }
 .header-user {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 16px;
   margin-left: auto;
+}
+
+.header-avatar-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.avatar-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 8px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  min-width: 160px;
+  z-index: 1000;
+}
+
+.avatar-dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 10px 14px;
+  background: none;
+  border: none;
+  text-align: left;
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.15s;
+}
+
+.avatar-dropdown-item:first-child {
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+
+.avatar-dropdown-item:last-child {
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+
+.avatar-dropdown-item:hover {
+  background: var(--color-bg);
 }
 .header-avatar {
   width: 32px;
@@ -636,6 +680,14 @@ button.link-btn:hover { color: var(--color-primary); }
   justify-content: center;
   flex-shrink: 0;
   letter-spacing: 0.03em;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  transition: opacity 0.15s, background 0.15s;
+}
+.header-avatar:hover {
+  opacity: 0.8;
+  background: var(--color-primary-h);
 }
 .header-email {
   font-size: 0.83rem;
@@ -1365,6 +1417,23 @@ html[data-theme="light"] .toast-error .toast-close { color: #991b1b; }
   transition: opacity 0.15s, background 0.15s;
 }
 .header-icon-btn:hover { opacity: 1; background: var(--color-surface); }
+
+.header-activity-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 6px 10px;
+  border-radius: 6px;
+  color: var(--color-text);
+  opacity: 0.7;
+  transition: opacity 0.15s, background 0.15s;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.header-activity-btn:hover { opacity: 1; background: var(--color-surface); }
 
 /* Account and settings containers inherit app-view layout via ID */
 #account, #settings {
