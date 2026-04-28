@@ -17,11 +17,11 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/db"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/models"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/session"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/storage"
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -29,7 +29,7 @@ import (
 
 // Handler holds shared dependencies for all HTTP handlers.
 type Handler struct {
-	db         *pgxpool.Pool   // may be nil in unit tests that don't touch the DB
+	db         *pgxpool.Pool // may be nil in unit tests that don't touch the DB
 	sessionSvc *session.Service
 	storage    storage.Backend // may be nil in unit tests that don't touch storage
 	bcryptCost int
