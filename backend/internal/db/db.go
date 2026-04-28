@@ -169,6 +169,20 @@ func RevokeRefreshToken(ctx context.Context, pool *pgxpool.Pool, id int64) error
 	return nil
 }
 
+// CleanupExpiredRefreshTokens removes refresh tokens whose expiry has been
+// in the past for at least `grace` (e.g. 7 days). Returns the number of rows deleted.
+// Designed to be called periodically from main; safe to run while the server serves.
+func CleanupExpiredRefreshTokens(ctx context.Context, pool *pgxpool.Pool, grace time.Duration) (int64, error) {
+	tag, err := pool.Exec(ctx,
+		`DELETE FROM refresh_tokens WHERE expires_at < NOW() - $1::interval`,
+		fmt.Sprintf("%d seconds", int64(grace.Seconds())),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("cleaning up refresh tokens: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // RevokeAllUserRefreshTokens revokes every refresh token belonging to a user.
 // Called on logout-all, password reset, and theft detection.
 func RevokeAllUserRefreshTokens(ctx context.Context, pool *pgxpool.Pool, userID int64) error {

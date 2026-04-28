@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,6 +24,13 @@ func newTestRouter() http.Handler {
 func newTestRouterWithSvc() (http.Handler, *session.Service) {
 	svc := session.NewService("test-secret-for-unit-tests")
 	return NewRouter(nil, svc, nil), svc
+}
+
+// withAllowedOrigin sets a same-origin header so the CSRF middleware lets the request through.
+// Use this on every mutating request in tests.
+func withAllowedOrigin(req *http.Request) *http.Request {
+	req.Header.Set("Origin", "http://localhost:5173")
+	return req
 }
 
 func TestGetHealth(t *testing.T) {
@@ -111,10 +119,10 @@ func TestGetSession_ValidAccessToken(t *testing.T) {
 	assert.Equal(t, "bob@example.com", resp.User.Email)
 }
 
-func TestGetSession_NoCookie(t *testing.T) {
+func TestGetSession_BearerHeaderIgnored(t *testing.T) {
 	r := newTestRouter()
 
-	// Sending an Authorization header must NOT be treated as a session anymore.
+	// Cookie-only auth: an Authorization header must NOT be treated as a session.
 	req := httptest.NewRequest(http.MethodGet, "/api/session", nil)
 	req.Header.Set("Authorization", "Bearer some-token")
 	rec := httptest.NewRecorder()
@@ -127,18 +135,44 @@ func TestGetSession_NoCookie(t *testing.T) {
 	assert.False(t, resp.LoggedIn)
 }
 
-func TestCORSPreflightRequest(t *testing.T) {
+func TestCORSPreflight_AllowedOrigin(t *testing.T) {
 	r := newTestRouter()
 
 	req := httptest.NewRequest(http.MethodOptions, "/api/session", nil)
-	req.Header.Set("Origin", "http://localhost:3000")
+	req.Header.Set("Origin", "http://localhost:5173")
 	req.Header.Set("Access-Control-Request-Method", "GET")
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.Equal(t, "http://localhost:3000", rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "http://localhost:5173", rec.Header().Get("Access-Control-Allow-Origin"))
 	assert.Equal(t, "true", rec.Header().Get("Access-Control-Allow-Credentials"))
+}
+
+func TestCORSPreflight_DisallowedOrigin(t *testing.T) {
+	r := newTestRouter()
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/session", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestCSRF_BlocksUnknownOrigin(t *testing.T) {
+	r := newTestRouter()
+
+	body := strings.NewReader(`{"email":"x@y.com","password":"hunter2"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://evil.example")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestSessionSvc_GenerateAndHashRefreshToken(t *testing.T) {
@@ -181,7 +215,7 @@ func TestFileEndpoints_RequireAuth(t *testing.T) {
 	}
 
 	for _, ep := range endpoints {
-		req := httptest.NewRequest(ep.method, ep.path, nil)
+		req := withAllowedOrigin(httptest.NewRequest(ep.method, ep.path, nil))
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "%s %s should require auth", ep.method, ep.path)
@@ -211,7 +245,7 @@ func TestUploadEndpoint_MissingChecksumHeader(t *testing.T) {
 	token, err := svc.CreateAccessToken(1, "user@example.com")
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/test.txt", nil)
+	req := withAllowedOrigin(httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/test.txt", nil))
 	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
 	req.Header.Set("X-File-Size", "100")
 	// X-Checksum-SHA256 intentionally omitted
@@ -229,9 +263,9 @@ func TestUploadEndpoint_MissingFileSizeHeader(t *testing.T) {
 	token, err := svc.CreateAccessToken(1, "user@example.com")
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/test.txt", nil)
+	req := withAllowedOrigin(httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/test.txt", nil))
 	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
-	req.Header.Set("X-Checksum-SHA256", "abc123")
+	req.Header.Set("X-Checksum-SHA256", "a3f5b2c1d4e6789012345678901234567890123456789012345678901234abcd")
 	// X-File-Size intentionally omitted
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
@@ -248,9 +282,9 @@ func TestUploadEndpoint_PathTraversal(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, path := range []string{"../etc/passwd", "foo/../bar/baz", "a/../../secret"} {
-		req := httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/"+path, nil)
+		req := withAllowedOrigin(httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/"+path, nil))
 		req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
-		req.Header.Set("X-Checksum-SHA256", "abc123")
+		req.Header.Set("X-Checksum-SHA256", "a3f5b2c1d4e6789012345678901234567890123456789012345678901234abcd")
 		req.Header.Set("X-File-Size", "10")
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
@@ -264,7 +298,7 @@ func TestUploadEndpoint_EmptyPath(t *testing.T) {
 	token, err := svc.CreateAccessToken(1, "user@example.com")
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/", nil)
+	req := withAllowedOrigin(httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/", nil))
 	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
 	req.Header.Set("X-Checksum-SHA256", "abc123")
 	req.Header.Set("X-File-Size", "10")
@@ -315,7 +349,7 @@ func TestAccountEndpoints_RequireAuth(t *testing.T) {
 	}
 
 	for _, ep := range endpoints {
-		req := httptest.NewRequest(ep.method, ep.path, nil)
+		req := withAllowedOrigin(httptest.NewRequest(ep.method, ep.path, nil))
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "%s %s should require auth", ep.method, ep.path)

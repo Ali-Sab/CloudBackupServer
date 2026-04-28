@@ -14,6 +14,9 @@
 const http = require('http');
 
 const BASE_URL = process.env.API_BASE_URL || 'http://localhost:8080';
+// Same-site origin advertised on every request — must be in the backend's
+// ALLOWED_ORIGINS list. Matches the renderer's served origin.
+const ORIGIN   = process.env.E2E_ORIGIN || 'http://localhost:5173';
 
 function httpPost(url, body) {
   return new Promise((resolve, reject) => {
@@ -27,6 +30,7 @@ function httpPost(url, body) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(data),
+        'Origin': ORIGIN,
       },
     }, (res) => {
       let raw = '';

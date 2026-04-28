@@ -1,8 +1,9 @@
 /**
  * Auth UI — session check, login, register, forgot/reset password, logout.
  *
- * Depends on: api-client.js (window.AuthExpiredError)
- *             api.js        (window.API)
+ * Cookie-only: tokens live in the Electron / browser session and attach
+ * automatically. There is no client-side TokenStore, no remember-me toggle,
+ * and no Authorization header.
  *
  * Exposes: window.Auth.checkSession
  */
@@ -16,7 +17,7 @@
     : null;
   const AuthExpiredError = _mod ? _mod.AuthExpiredError : window.AuthExpiredError;
   const escapeHtml       = _mod ? _mod.escapeHtml       : window.escapeHtml;
-  const TokenStore       = _mod ? _mod.TokenStore       : window.TokenStore;
+  const APIClient        = _mod ? _mod.APIClient        : window.APIClient;
 
   const _apiMod = (typeof require !== 'undefined' && typeof module !== 'undefined')
     ? require('./api')
@@ -27,8 +28,6 @@
 
   /**
    * Pure function: derive a render descriptor from a session API response.
-   * @param {{logged_in: boolean, user?: object}} data
-   * @returns {{type: 'logged-in'|'logged-out', email?: string}}
    */
   function renderSessionState(data) {
     if (data.logged_in && data.user) {
@@ -37,33 +36,38 @@
     return { type: 'logged-out' };
   }
 
+  /**
+   * Estimate password strength as 0–4 plus a label. Pure.
+   * Cheap heuristic — length + variety. Not a security gate, just UX guidance.
+   */
+  function passwordStrength(p) {
+    if (!p) return { score: 0, label: 'Empty' };
+    let score = 0;
+    if (p.length >= 6) score++;
+    if (p.length >= 10) score++;
+    if (/[A-Z]/.test(p) && /[a-z]/.test(p)) score++;
+    if (/[0-9]/.test(p)) score++;
+    if (/[^A-Za-z0-9]/.test(p)) score++;
+    score = Math.min(4, score);
+    const labels = ['Very weak', 'Weak', 'Okay', 'Good', 'Strong'];
+    return { score, label: labels[score] };
+  }
+
   // ---- DOM interaction ----------------------------------------------------
-  // Only runs in browser/Electron. Skipped by Jest (no real document/window).
 
   if (typeof document !== 'undefined' && typeof window !== 'undefined' && !window._testMode) {
 
-    // -- Session check -------------------------------------------------------
-
-    async function checkSession() {
+    async function checkSession({ skipRefresh = false } = {}) {
       const el = document.getElementById('session-status');
       el.className = 'card loading';
       el.innerHTML = '<p>Connecting to server…</p>';
 
-      // On Electron, try to restore a persisted refresh token before hitting the server.
-      // We must explicitly refresh here because GET /api/session returns 200 {logged_in:false}
-      // for unauthenticated requests — never 401 — so the auto-refresh in APIClient.request
-      // would never fire on its own.
-      if (TokenStore._isElectron() && !TokenStore.getRefreshToken()) {
-        try {
-          const saved = await window.electronAPI.loadRefreshToken();
-          if (saved) {
-            TokenStore.store(null, saved);
-            const ok = await APIClient.tryRefresh();
-            if (!ok) window.electronAPI.clearRefreshToken();
-          }
-        } catch (e) {
-          console.error('[remember-me] restore failed:', e);
-        }
+      // Cookie auth: try a proactive refresh so a still-valid refresh cookie
+      // restores the session without requiring re-login. /api/session returns
+      // 200 {logged_in:false} when not authed, so request() can't auto-refresh
+      // there. Skip when we just logged in — cookies are already fresh.
+      if (!skipRefresh) {
+        try { await APIClient.tryRefresh(); } catch {}
       }
 
       try {
@@ -92,8 +96,6 @@
       btn.addEventListener('click', checkSession);
       el.appendChild(btn);
     }
-
-    // -- State rendering -----------------------------------------------------
 
     function renderState(el, state) {
       if (state.type === 'logged-in') {
@@ -151,7 +153,6 @@
               <button type="button" class="password-toggle" aria-label="Show password" data-target="password">👁</button>
             </div>
           </label>
-          <div id="remember-me-slot"></div>
           <div class="form-error" id="form-error">${errorMsg ? escapeHtml(errorMsg) : ''}</div>
           <button type="submit" id="login-submit-btn">Sign In</button>
           <button type="button" id="register-btn">Create Account</button>
@@ -162,20 +163,6 @@
       document.getElementById('register-btn').addEventListener('click', renderRegisterForm.bind(null, el));
       document.getElementById('forgot-btn').addEventListener('click', renderForgotPasswordForm.bind(null, el));
       el.querySelectorAll('.password-toggle').forEach(attachPasswordToggle);
-
-      // Async: inject the remember-me checkbox only when safeStorage is confirmed available.
-      // Runs after the form is already visible so callers need not be async.
-      if (TokenStore._isElectron()) {
-        window.electronAPI.isSafeStorageAvailable().then(function (available) {
-          const slot = document.getElementById('remember-me-slot');
-          if (!available || !slot) return;
-          slot.innerHTML = `
-            <label class="remember-me-label">
-              <input type="checkbox" id="remember-me" />
-              Remember me
-            </label>`;
-        }).catch(() => {});
-      }
     }
 
     async function handleLogin(e) {
@@ -189,8 +176,6 @@
       errorEl.textContent = '';
       clearFieldErrors([emailInput, passInput]);
 
-      const rememberMe = document.getElementById('remember-me');
-
       setButtonLoading(submitBtn, true, 'Signing in…');
       try {
         const resp = await API.login(email, password);
@@ -202,14 +187,8 @@
           setButtonLoading(submitBtn, false, 'Sign In');
           return;
         }
-        if (rememberMe && rememberMe.checked) {
-          const refreshToken = TokenStore.getRefreshToken();
-          if (refreshToken) {
-            const result = await window.electronAPI.saveRefreshToken(refreshToken);
-            if (result && result.error) console.error('[remember-me] save failed:', result.error);
-          }
-        }
-        checkSession();
+        // Cookies are set by the server; skip proactive refresh since they're fresh.
+        checkSession({ skipRefresh: true });
       } catch {
         errorEl.textContent = 'Connection error — please try again.';
         setButtonLoading(submitBtn, false, 'Sign In');
@@ -233,6 +212,7 @@
               <input type="password" id="reg-password" required />
               <button type="button" class="password-toggle" aria-label="Show password" data-target="reg-password">👁</button>
             </div>
+            <div id="reg-strength" class="password-strength" aria-live="polite"></div>
           </label>
           <div class="form-error" id="reg-error"></div>
           <button type="submit" id="reg-submit-btn">Register</button>
@@ -242,6 +222,14 @@
       document.getElementById('register-form').addEventListener('submit', handleRegister);
       document.getElementById('back-btn').addEventListener('click', () => renderLoginForm(el));
       el.querySelectorAll('.password-toggle').forEach(attachPasswordToggle);
+
+      const passInput = document.getElementById('reg-password');
+      const strengthEl = document.getElementById('reg-strength');
+      passInput.addEventListener('input', function () {
+        const s = passwordStrength(passInput.value);
+        strengthEl.textContent = passInput.value ? `Strength: ${s.label}` : '';
+        strengthEl.dataset.score = String(s.score);
+      });
     }
 
     async function handleRegister(e) {
@@ -266,8 +254,7 @@
           setButtonLoading(submitBtn, false, 'Register');
           return;
         }
-        // Auth cookies are set by the server; nothing to store in JS.
-        checkSession();
+        checkSession({ skipRefresh: true });
       } catch {
         errorEl.textContent = 'Connection error — please try again.';
         setButtonLoading(submitBtn, false, 'Register');
@@ -275,6 +262,8 @@
     }
 
     // -- Forgot password flow ------------------------------------------------
+    // TODO(forgot-password): backend flow is under development; this UI stays
+    // as-is until the email-delivery path lands. See backend handlers.go.
 
     function renderForgotPasswordForm(el) {
       el.className = 'card logged-out';
@@ -407,7 +396,6 @@
       if (!input) return;
       input.classList.add('input-error');
       input.classList.remove('input-shake');
-      // Re-trigger shake animation
       void input.offsetWidth;
       input.classList.add('input-shake');
       input.addEventListener('animationend', function () {
@@ -436,16 +424,9 @@
     // -- Logout --------------------------------------------------------------
 
     async function logout() {
-      try {
-        await API.logout();
-      } catch {
-        // Ignore network errors — token will expire naturally.
-      }
-      TokenStore.clear();
-      checkSession();
+      try { await API.logout(); } catch { /* cookie will expire eventually */ }
+      checkSession({ skipRefresh: true });
     }
-
-    // -- Expose public interface ---------------------------------------------
 
     // Wire up logo → dashboard and History.
     document.getElementById('logo-btn').addEventListener('click', function () {
@@ -478,25 +459,33 @@
         setAvatarDropdownOpen(false);
       });
       document.getElementById('avatar-dropdown-signout').addEventListener('click', logout);
-      // Close dropdown when clicking elsewhere
       document.addEventListener('click', function () {
         setAvatarDropdownOpen(false);
       });
     }
 
-    // -- #23 Theme toggle ----------------------------------------------------
+    // -- Theme toggle --------------------------------------------------------
+    // Default: respect prefers-color-scheme; explicit user choice wins.
 
     (function initThemeToggle() {
-      // Load saved preference
       const saved = localStorage.getItem('theme');
-      if (saved === 'light') {
+      let theme;
+      if (saved === 'light' || saved === 'dark') {
+        theme = saved;
+      } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+        theme = 'light';
+      } else {
+        theme = 'dark';
+      }
+      if (theme === 'light') {
         document.documentElement.setAttribute('data-theme', 'light');
+      } else {
+        document.documentElement.removeAttribute('data-theme');
       }
 
-      // Wire up existing theme toggle button in header
       const btn = document.getElementById('theme-toggle-btn');
       if (btn) {
-        btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☀️' : '🌙';
+        btn.textContent = theme === 'light' ? '☀️' : '🌙';
         btn.addEventListener('click', function () {
           const isLight = document.documentElement.getAttribute('data-theme') === 'light';
           if (isLight) {
@@ -518,7 +507,7 @@
   // ---- Exports (for Jest) -------------------------------------------------
 
   if (typeof module !== 'undefined') {
-    module.exports = { renderSessionState };
+    module.exports = { renderSessionState, passwordStrength };
   }
 
 })();

@@ -1862,3 +1862,21 @@ html[data-theme="light"] .toast-error .toast-close { color: #991b1b; }
   font-size: 0.85rem;
 }
 .history-load-more-btn:hover { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+
+/* ---- Password strength indicator (registration form) ---- */
+.password-strength {
+  margin-top: 4px;
+  font-size: 0.8rem;
+  color: var(--color-text-muted, #888);
+  min-height: 1em;
+}
+.password-strength[data-score="0"] { color: #d54; }
+.password-strength[data-score="1"] { color: #d54; }
+.password-strength[data-score="2"] { color: #c91; }
+.password-strength[data-score="3"] { color: #4a8; }
+.password-strength[data-score="4"] { color: #2a7; }
+
+/* ---- Dashboard per-folder Backup button ---- */
+.backup-folder-btn {
+  font-weight: 600;
+}

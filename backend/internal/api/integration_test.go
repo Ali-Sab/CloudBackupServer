@@ -137,9 +137,16 @@ func newTestClient() *http.Client {
 
 // postJSON posts JSON using http.DefaultClient (no cookie jar).
 // Use for requests that don't require an authenticated session.
+// testOrigin is the same-site origin every test request advertises so the
+// CSRF middleware lets it through.
+const testOrigin = "http://localhost:5173"
+
 func postJSON(t *testing.T, url, body string) *http.Response {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", bytes.NewBufferString(body))
+	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", testOrigin)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	return resp
 }
@@ -149,6 +156,7 @@ func postJSONWithClient(t *testing.T, client *http.Client, url, body string) *ht
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", testOrigin)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	return resp
@@ -181,6 +189,7 @@ func authPut(t *testing.T, client *http.Client, url, body string) *http.Response
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPut, url, bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", testOrigin)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	return resp
@@ -189,6 +198,7 @@ func authPut(t *testing.T, client *http.Client, url, body string) *http.Response
 func authDelete(t *testing.T, client *http.Client, url string) *http.Response {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodDelete, url, nil)
+	req.Header.Set("Origin", testOrigin)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	return resp
@@ -198,6 +208,7 @@ func authDeleteWithBody(t *testing.T, client *http.Client, url, body string) *ht
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodDelete, url, bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", testOrigin)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	return resp
@@ -207,6 +218,7 @@ func authDeleteWithBody(t *testing.T, client *http.Client, url, body string) *ht
 func postRefresh(t *testing.T, client *http.Client, srvURL string) *http.Response {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, srvURL+"/api/auth/refresh", nil)
+	req.Header.Set("Origin", testOrigin)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	return resp
@@ -218,6 +230,7 @@ func postRefreshWithCookie(t *testing.T, srvURL, rawToken string) *http.Response
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, srvURL+"/api/auth/refresh", nil)
 	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: rawToken})
+	req.Header.Set("Origin", testOrigin)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	return resp
@@ -227,6 +240,7 @@ func postRefreshWithCookie(t *testing.T, srvURL, rawToken string) *http.Response
 func postLogout(t *testing.T, client *http.Client, srvURL string) *http.Response {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, srvURL+"/api/auth/logout", nil)
+	req.Header.Set("Origin", testOrigin)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	return resp
@@ -266,6 +280,7 @@ func authUpload(t *testing.T, client *http.Client, url, checksum string, body []
 	req.Header.Set("X-Checksum-SHA256", checksum)
 	req.Header.Set("X-File-Size", strconv.Itoa(len(body)))
 	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Origin", testOrigin)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	return resp
@@ -421,8 +436,9 @@ func TestIntegration_Logout(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, logoutResp.StatusCode)
 
 	// Refresh after logout must fail — cookie jar has no refresh_token anymore.
+	// Cookie-only auth: missing refresh cookie is an auth failure, not a bad request.
 	resp := postRefresh(t, client, srv.URL)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
 	// Logout again must still succeed (idempotent).
 	logoutResp2 := postLogout(t, client, srv.URL)
@@ -513,6 +529,7 @@ func TestIntegration_FolderEndpoints_RequireAuth(t *testing.T) {
 		} else {
 			req, _ = http.NewRequest(tc.method, srv.URL+tc.path, nil)
 		}
+		req.Header.Set("Origin", testOrigin)
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "%s %s", tc.method, tc.path)

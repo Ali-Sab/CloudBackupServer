@@ -245,10 +245,41 @@ if (typeof module !== 'undefined') {
   // Populated by loadBackupStatuses; used by the metadata modal.
   const backupRecords = new Map();
 
+  // Auto-backup debounce timer — fires N ms after the last filesystem change.
+  let _autoBackupTimer = null;
+  const AUTO_BACKUP_DEBOUNCE_MS = 5000;
+
+  function autoBackupEnabled() {
+    try { return localStorage.getItem('settings_auto_backup') !== 'false'; }
+    catch { return true; }
+  }
+
+  function scheduleAutoBackup() {
+    if (!autoBackupEnabled()) return;
+    if (_autoBackupTimer) clearTimeout(_autoBackupTimer);
+    _autoBackupTimer = setTimeout(function () {
+      _autoBackupTimer = null;
+      const btn = document.getElementById('backup-now-btn');
+      // Only auto-backup when this folder is currently open and not already running.
+      if (btn && !btn.disabled && currentPath && currentFolderId) {
+        backupNow({ auto: true }).catch(function () {});
+      }
+    }, AUTO_BACKUP_DEBOUNCE_MS);
+  }
+
   // Register the live-watch listener once at module startup.
   electronAPI.onDirectoryChange(function () {
-    if (currentPath) refreshDirectory(currentPath, { silent: true, skipUpload: true });
+    if (currentPath) {
+      refreshDirectory(currentPath, { silent: true, skipUpload: true });
+      scheduleAutoBackup();
+    }
   });
+
+  if (typeof electronAPI.onDirectoryWatchFailed === 'function') {
+    electronAPI.onDirectoryWatchFailed(function () {
+      window.UI.toast('Live folder watching is not supported on this system — auto-backup disabled', 'error');
+    });
+  }
 
   // ---- Public interface ---------------------------------------------------
 
@@ -460,7 +491,7 @@ if (typeof module !== 'undefined') {
 
   // ---- Backup -------------------------------------------------------------
 
-  async function backupNow() {
+  async function backupNow(opts) {
     if (!currentPath || !currentFolderId) return;
 
     const btn = document.getElementById('backup-now-btn');
@@ -470,7 +501,7 @@ if (typeof module !== 'undefined') {
     try {
       entries = await electronAPI.readDirectory(currentPath);
     } catch {
-      window.UI.toast('Could not read folder', 'error');
+      if (!(opts && opts.auto)) window.UI.toast('Could not read folder', 'error');
       if (btn) { btn.disabled = false; btn.textContent = 'Backup Now'; }
       return;
     }
@@ -480,9 +511,9 @@ if (typeof module !== 'undefined') {
 
     const fileEntries = entries.filter(function (e) { return !e.isDirectory; });
     if (fileEntries.length === 0) {
-      window.UI.toast('No files to back up');
+      if (!(opts && opts.auto)) window.UI.toast('No files to back up');
     } else {
-      await uploadFiles(currentPath, fileEntries);
+      await uploadFiles(currentPath, fileEntries, opts);
     }
 
     if (btn) { btn.disabled = false; btn.textContent = 'Backup Now'; }
@@ -534,11 +565,11 @@ if (typeof module !== 'undefined') {
    * @param {string} rootPath
    * @param {Array} fileEntries
    */
-  async function uploadFiles(rootPath, fileEntries) {
+  async function uploadFiles(rootPath, fileEntries, opts) {
     if (fileEntries.length === 0) return;
 
     const uploadBase = window.APIClient.BASE_URL + '/api/folders/' + currentFolderId + '/backup';
-    const accessToken = window.TokenStore.getAccessToken();
+    const isAuto = !!(opts && opts.auto);
     const results = [];
     const total = fileEntries.length;
     let done = 0;
@@ -593,14 +624,13 @@ if (typeof module !== 'undefined') {
         result = await electronAPI.uploadFile(
           rootPath,
           entry.relativePath,
-          uploadBase,
-          accessToken
+          uploadBase
         );
         if (result.error) {
-          console.warn('Backup upload failed for', entry.relativePath + ':', result.error);
+          console.warn('[Files] backup upload failed for', entry.relativePath + ':', result.error);
         }
       } catch (err) {
-        console.warn('Backup upload failed for', entry.relativePath + ':', err.message);
+        console.warn('[Files] backup upload failed for', entry.relativePath + ':', err.message);
         result = { error: err.message, skipped: false };
       }
 
@@ -613,7 +643,13 @@ if (typeof module !== 'undefined') {
     }
 
     const summary = buildBackupSummary(results);
-    if (summary) window.UI.toast(summary.message, summary.type);
+    if (summary) {
+      // Auto-runs are silent on "all unchanged" — only surface uploads/failures.
+      const onlyUnchanged = summary.type === 'success' && !/uploaded|failed/.test(summary.message);
+      if (!isAuto || !onlyUnchanged) {
+        window.UI.toast(summary.message, summary.type);
+      }
+    }
   }
 
   // ---- View rendering -----------------------------------------------------
@@ -1063,9 +1099,8 @@ if (typeof module !== 'undefined') {
       renderView();
 
       const uploadBase = window.APIClient.BASE_URL + '/api/folders/' + currentFolderId + '/backup';
-      const accessToken = window.TokenStore.getAccessToken();
       const result = await electronAPI.uploadFile(
-        currentPath, entry.relativePath, uploadBase, accessToken
+        currentPath, entry.relativePath, uploadBase
       );
 
       if (result.error) {

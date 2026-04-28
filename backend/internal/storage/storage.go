@@ -7,14 +7,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 // Backend is the interface implemented by Client and used by handlers.
-// Defining it here (rather than in the api package) keeps the storage
-// package self-contained and makes it easy to swap implementations in tests.
 type Backend interface {
 	PutObject(ctx context.Context, key string, r io.Reader, size int64, contentType string) error
 	GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error)
@@ -42,14 +41,30 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Client, e
 }
 
 // ObjectKey returns the canonical object key for a backed-up file.
-// Format: "{userID}/{watchedPathID}/{relativePath}" — e.g. "1/3/photos/2024/img.jpg".
-func ObjectKey(userID, watchedPathID int64, relativePath string) string {
-	return fmt.Sprintf("%d/%d/%s", userID, watchedPathID, relativePath)
+// Format: "{userID}/{watchedPathID}/{relativePath}".
+//
+// Caller is expected to have already validated relativePath via
+// api.validateRelativePath. This function performs a final defensive check
+// for NUL bytes / leading slash / control chars so a bug in the caller
+// can't smuggle a malformed key into MinIO.
+func ObjectKey(userID, watchedPathID int64, relativePath string) (string, error) {
+	if relativePath == "" {
+		return "", fmt.Errorf("relative path is empty")
+	}
+	if strings.ContainsRune(relativePath, 0) {
+		return "", fmt.Errorf("relative path contains NUL byte")
+	}
+	if strings.HasPrefix(relativePath, "/") {
+		return "", fmt.Errorf("relative path must not start with /")
+	}
+	for _, r := range relativePath {
+		if r < 0x20 { // control characters
+			return "", fmt.Errorf("relative path contains control character")
+		}
+	}
+	return fmt.Sprintf("%d/%d/%s", userID, watchedPathID, relativePath), nil
 }
 
-// PutObject streams r into object storage under key.
-// size must be the exact byte count (used as Content-Length); pass -1 only
-// if the size is genuinely unknown (disables MinIO's multipart optimisation).
 func (c *Client) PutObject(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
 	_, err := c.mc.PutObject(ctx, c.bucket, key, r, size, minio.PutObjectOptions{
 		ContentType: contentType,
@@ -60,8 +75,6 @@ func (c *Client) PutObject(ctx context.Context, key string, r io.Reader, size in
 	return nil
 }
 
-// GetObject returns a streaming reader for the given object key and its size.
-// The caller must close the returned ReadCloser.
 func (c *Client) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
 	obj, err := c.mc.GetObject(ctx, c.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
@@ -75,7 +88,6 @@ func (c *Client) GetObject(ctx context.Context, key string) (io.ReadCloser, int6
 	return obj, info.Size, nil
 }
 
-// DeleteObject removes a single object.
 func (c *Client) DeleteObject(ctx context.Context, key string) error {
 	err := c.mc.RemoveObject(ctx, c.bucket, key, minio.RemoveObjectOptions{})
 	if err != nil {
@@ -85,7 +97,6 @@ func (c *Client) DeleteObject(ctx context.Context, key string) error {
 }
 
 // DeleteUserObjects removes all objects whose key starts with "{userID}/".
-// Called when a user changes their watched path — all prior backups are stale.
 func (c *Client) DeleteUserObjects(ctx context.Context, userID int64) error {
 	prefix := fmt.Sprintf("%d/", userID)
 	objectsCh := c.mc.ListObjects(ctx, c.bucket, minio.ListObjectsOptions{

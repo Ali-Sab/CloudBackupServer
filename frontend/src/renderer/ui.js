@@ -30,10 +30,20 @@
    * @param {'success'|'error'} [type='success']
    * @param {number} [durationMs=3000]
    */
+  // Dedupe rapid duplicate toasts. Same (message, type) within 1.5s = no-op.
+  let _lastKey = '';
+  let _lastTs = 0;
+
   function toast(message, type, durationMs) {
     if (typeof document === 'undefined') return;
     type = type || 'success';
     durationMs = durationMs || 3000;
+
+    const key = type + '\x00' + message;
+    const now = Date.now();
+    if (key === _lastKey && now - _lastTs < 1500) return;
+    _lastKey = key;
+    _lastTs = now;
 
     const container = getContainer();
     const el = document.createElement('div');
