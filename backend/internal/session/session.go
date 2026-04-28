@@ -13,12 +13,20 @@ import (
 )
 
 const (
-	// AccessTokenTTL is intentionally short — clients use refresh tokens to rotate.
-	AccessTokenTTL = 1 * time.Minute
+	// AccessTokenTTL — short-lived JWT in the access_token cookie.
+	// Long enough that idle users don't refresh constantly, short enough that
+	// a stolen cookie has limited useful life.
+	AccessTokenTTL = 5 * time.Minute
 	// RefreshTokenTTL is the lifetime of an opaque refresh token.
 	RefreshTokenTTL = 30 * 24 * time.Hour
 	// PasswordResetTokenTTL is the lifetime of a password-reset token.
 	PasswordResetTokenTTL = 1 * time.Hour
+
+	// MinPasswordLength is the minimum password length we accept.
+	// Intentionally lenient — paired with a password-strength UI hint client-side.
+	MinPasswordLength = 4
+	// MaxPasswordLength avoids bcrypt's silent 72-byte truncation surprising users.
+	MaxPasswordLength = 72
 )
 
 // Claims holds the JWT payload for access tokens.
@@ -54,9 +62,10 @@ func (s *Service) CreateAccessToken(userID int64, email string) (string, error) 
 }
 
 // ValidateAccessToken parses and validates an access token JWT.
+// Pinned to HS256 — any other algorithm (including the dangerous "none") is rejected.
 func (s *Service) ValidateAccessToken(tokenString string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+		if t.Method != jwt.SigningMethodHS256 {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
 		return s.secret, nil

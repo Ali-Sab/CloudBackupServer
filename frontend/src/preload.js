@@ -2,110 +2,50 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 // Expose a minimal, typed API surface to the renderer via window.electronAPI.
 // The renderer has no direct access to Node or Electron internals.
+//
+// Auth note: the API is cookie-only. The Electron session keeps cookies
+// across restarts, so "remember me" is now implicit — log out to forget.
 contextBridge.exposeInMainWorld('electronAPI', {
 
   // ---- Directory browser ----
 
-  /** Open native folder picker; resolves to the chosen path or null if cancelled. */
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
-
-  /** Read all entries in dirPath; resolves to { name, isDirectory, size, modified }[]. */
   readDirectory: (dirPath) => ipcRenderer.invoke('read-directory', dirPath),
-
-  /** Start watching dirPath for changes. Replaces any previously active watcher. */
   watchDirectory: (dirPath) => ipcRenderer.invoke('watch-directory', dirPath),
-
-  /** Stop the active directory watcher. */
   unwatchDirectory: () => ipcRenderer.invoke('unwatch-directory'),
 
   /** Register a callback that fires whenever the watched directory changes. */
   onDirectoryChange: (callback) =>
     ipcRenderer.on('directory-changed', (_event, data) => callback(data)),
 
+  /** Register a callback for when the watcher fails (e.g. recursive watch unsupported). */
+  onDirectoryWatchFailed: (callback) =>
+    ipcRenderer.on('directory-watch-failed', () => callback()),
+
   // ---- File backup ----
 
   /**
-   * Upload a single file to the backend backup endpoint.
-   * Streams the file bytes — does not buffer the entire file in memory.
-   * SHA-256 is computed by streaming as well.
-   * Auth is handled via the access_token cookie read from the Electron session store.
-   *
-   * @param {string} rootPath      - Absolute path to the watched directory root
-   * @param {string} relativePath  - POSIX relative path within the root (e.g. "photos/img.jpg")
-   * @param {string} apiBaseUrl    - Backend base URL (e.g. "http://localhost:8080")
-   * @returns {Promise<{skipped: boolean, error: string|null}>}
+   * Upload a single file to the backend backup endpoint. The Electron session's
+   * cookie jar is forwarded automatically — no token argument required.
    */
-  uploadFile: (rootPath, relativePath, apiBaseUrl, accessToken) =>
-    ipcRenderer.invoke('upload-file', { rootPath, relativePath, apiBaseUrl, accessToken }),
+  uploadFile: (rootPath, relativePath, apiBaseUrl) =>
+    ipcRenderer.invoke('upload-file', { rootPath, relativePath, apiBaseUrl }),
 
-  /**
-   * Compute the SHA-256 checksum of a file within the watched directory.
-   * Streams the file — does not buffer it in memory.
-   *
-   * @param {string} rootPath      - Absolute path to the watched directory root
-   * @param {string} relativePath  - POSIX relative path within the root
-   * @returns {Promise<{checksum: string}|{error: string}>}
-   */
   checksumFile: (rootPath, relativePath) =>
     ipcRenderer.invoke('checksum-file', { rootPath, relativePath }),
 
-  /**
-   * Write bytes to a file within the watched directory, creating parent dirs as needed.
-   * @param {string} rootPath      - Absolute path to the watched directory root
-   * @param {string} relativePath  - POSIX relative path within the root
-   * @param {ArrayBuffer} buffer   - File contents
-   * @returns {Promise<{}|{error: string}>}
-   */
   saveFile: (rootPath, relativePath, buffer) =>
     ipcRenderer.invoke('save-file', { rootPath, relativePath, buffer }),
 
-  /**
-   * Delete a file within the watched directory.
-   * @param {string} rootPath
-   * @param {string} relativePath
-   * @returns {Promise<{}|{error: string}>}
-   */
   deleteFile: (rootPath, relativePath) =>
     ipcRenderer.invoke('delete-file', { rootPath, relativePath }),
 
-  /**
-   * Open a file with the OS default application.
-   * @param {string} rootPath
-   * @param {string} relativePath
-   * @returns {Promise<{}|{error: string}>}
-   */
   openFile: (rootPath, relativePath) =>
     ipcRenderer.invoke('open-file', { rootPath, relativePath }),
 
-  /**
-   * Return all file paths (relative, POSIX) under rootPath, recursively.
-   * @param {string} rootPath
-   * @returns {Promise<string[]>}
-   */
   getAllFilePaths: (rootPath) =>
     ipcRenderer.invoke('get-all-file-paths', { rootPath }),
 
-  /**
-   * Read up to 50 MB of a local file for in-app preview (bounded read, does not buffer the whole file).
-   * Returns { error: 'too_large', size } if the file exceeds the cap.
-   * @param {string} rootPath
-   * @param {string} relativePath
-   * @returns {Promise<{buffer: ArrayBuffer}|{error: string, size?: number}>}
-   */
   readFilePreview: (rootPath, relativePath) =>
     ipcRenderer.invoke('read-file-preview', { rootPath, relativePath }),
-
-  // ---- Remember me (safeStorage keychain) ----
-
-  /** Returns true if the OS keychain is available for safeStorage. */
-  isSafeStorageAvailable: () => ipcRenderer.invoke('safe-storage-available'),
-
-  /** Encrypt and persist the refresh token to the OS keychain. */
-  saveRefreshToken: (token) => ipcRenderer.invoke('save-refresh-token', token),
-
-  /** Load and decrypt the persisted refresh token, or null if none. */
-  loadRefreshToken: () => ipcRenderer.invoke('load-refresh-token'),
-
-  /** Remove the persisted refresh token. */
-  clearRefreshToken: () => ipcRenderer.invoke('clear-refresh-token'),
 });

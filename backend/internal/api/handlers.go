@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"net/mail"
+	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -27,10 +29,10 @@ import (
 
 // Handler holds shared dependencies for all HTTP handlers.
 type Handler struct {
-	db           *pgxpool.Pool   // may be nil in unit tests that don't touch the DB
-	sessionSvc   *session.Service
-	storage      storage.Backend // may be nil in unit tests that don't touch storage
-	bcryptCost  int
+	db         *pgxpool.Pool   // may be nil in unit tests that don't touch the DB
+	sessionSvc *session.Service
+	storage    storage.Backend // may be nil in unit tests that don't touch storage
+	bcryptCost int
 }
 
 // NewHandler creates a Handler with the provided dependencies.
@@ -64,26 +66,36 @@ type UserInfo struct {
 }
 
 // AuthResponse is returned after a successful login or registration.
-// Tokens are also set as HttpOnly cookies for browser clients.
+// Tokens travel exclusively via HttpOnly cookies — never in the response body.
 type AuthResponse struct {
-	User         UserInfo `json:"user"`
-	AccessToken  string   `json:"access_token"`
-	RefreshToken string   `json:"refresh_token"`
-}
-
-// RefreshResponse is returned by POST /api/auth/refresh.
-// Tokens are also rotated via HttpOnly cookies for browser clients.
-type RefreshResponse struct {
-	User         UserInfo `json:"user"`
-	AccessToken  string   `json:"access_token"`
-	RefreshToken string   `json:"refresh_token"`
+	User UserInfo `json:"user"`
 }
 
 // Cookie names used for auth tokens.
 const (
 	cookieAccessToken  = "access_token"
 	cookieRefreshToken = "refresh_token"
+
+	// maxJSONBody bounds the size of any JSON request body. None of our
+	// JSON endpoints legitimately need more than this, and an unbounded
+	// decoder is a trivial DoS vector.
+	maxJSONBody = 1 << 20 // 1 MiB
+
+	// maxRelativePathLen caps relative_path length to a sane value.
+	// 1024 is generous — most filesystems cap at 255 per segment, 4096 total.
+	maxRelativePathLen = 1024
+
+	// maxBackupSize caps a single uploaded file at 10 GiB. Adjust upward if needed.
+	maxBackupSize = 10 * 1024 * 1024 * 1024
 )
+
+// secureCookies controls whether Set-Cookie includes the Secure flag.
+// Toggled by env var COOKIE_SECURE — disabled for local dev (HTTP), enabled
+// in production (HTTPS).
+var secureCookies = os.Getenv("COOKIE_SECURE") == "true"
+
+// SetSecureCookies allows main / tests to override the env-derived default.
+func SetSecureCookies(v bool) { secureCookies = v }
 
 // ErrorResponse wraps an error message returned to the client.
 type ErrorResponse struct {
@@ -108,9 +120,15 @@ type ForgotPasswordRequest struct {
 }
 
 // ForgotPasswordResponse is returned by POST /api/auth/forgot-password.
+//
+// TODO(forgot-password): the entire forgot/reset flow is under development.
+// Today it leaks account existence (404 when email unknown) and returns the
+// reset token in the response body. Before shipping, switch to an always-200
+// generic response, deliver the token via email, and remove ResetToken/DevNote
+// fields. Tracked separately — left as-is for now per product decision.
 type ForgotPasswordResponse struct {
 	Message    string `json:"message"`
-	ResetToken string `json:"reset_token,omitempty"` // DEV ONLY — will move to email
+	ResetToken string `json:"reset_token,omitempty"` // DEV ONLY — see TODO above
 	DevNote    string `json:"_dev_note,omitempty"`
 }
 
@@ -162,8 +180,6 @@ type FolderResponse struct {
 }
 
 // FileEntry describes a single file or directory sent by the client.
-// RelativePath is the POSIX path relative to the watched root (e.g. "photos/2024/img.jpg").
-// Top-level entries have RelativePath equal to Name.
 type FileEntry struct {
 	Name         string `json:"name"`
 	RelativePath string `json:"relative_path"`
@@ -193,51 +209,104 @@ type UploadFileResponse struct {
 	Size           int64     `json:"size"`
 	ChecksumSHA256 string    `json:"checksum_sha256"`
 	BackedUpAt     time.Time `json:"backed_up_at"`
-	Version        int       `json:"version"` // increments on each content change
-	Skipped        bool      `json:"skipped"` // true when checksum matched — no upload occurred
+	Version        int       `json:"version"`
+	Skipped        bool      `json:"skipped"`
+}
+
+// ---- Helpers ----
+
+// decodeJSON wraps r.Body with a size cap and decodes into v.
+// Logs (debug-style) on decode failure so transient client bugs are diagnosable.
+func decodeJSON(r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, maxJSONBody)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		log.Printf("debug: json decode failed for %s %s: %v", r.Method, r.URL.Path, err)
+		return err
+	}
+	return nil
+}
+
+// validateRelativePath enforces a strict shape on user-supplied relative
+// paths used as object-storage keys and URL components. Returns the cleaned
+// path (always POSIX, no leading slash) on success.
+func validateRelativePath(p string) (string, error) {
+	if p == "" {
+		return "", errors.New("relative_path is required")
+	}
+	if len(p) > maxRelativePathLen {
+		return "", errors.New("relative_path is too long")
+	}
+	if strings.ContainsRune(p, 0) {
+		return "", errors.New("relative_path contains NUL byte")
+	}
+	if strings.ContainsAny(p, "\\") {
+		return "", errors.New("relative_path must use POSIX separators")
+	}
+	if strings.HasPrefix(p, "/") {
+		return "", errors.New("relative_path must be relative")
+	}
+	cleaned := path.Clean(p)
+	if cleaned != p {
+		return "", errors.New("relative_path must be in canonical form")
+	}
+	for _, seg := range strings.Split(cleaned, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", errors.New("invalid path segment")
+		}
+	}
+	return cleaned, nil
+}
+
+// validatePassword enforces a minimum length, a maximum (bcrypt's truncation
+// limit), and rejects passwords containing a NUL byte. Intentionally lenient
+// on complexity so the user can test with simple passwords; the renderer
+// shows a strength indicator for guidance.
+func validatePassword(p string) error {
+	if len(p) < session.MinPasswordLength {
+		return fmt.Errorf("password must be at least %d characters", session.MinPasswordLength)
+	}
+	if len(p) > session.MaxPasswordLength {
+		return fmt.Errorf("password must be no more than %d characters", session.MaxPasswordLength)
+	}
+	if strings.ContainsRune(p, 0) {
+		return errors.New("password contains NUL byte")
+	}
+	return nil
 }
 
 // ---- Handlers ----
 
 // GetHealth handles GET /api/health.
 func (h *Handler) GetHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok", Version: "0.3.0"})
+	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok", Version: "0.4.0"})
 }
 
 // GetSession handles GET /api/session.
-// Returns current session state based on the Bearer token or access_token cookie.
-// Always returns 200 — missing/invalid tokens yield {logged_in: false}.
+// Returns current session state based on the access_token cookie.
+// Always returns 200 — missing/invalid cookie yields {logged_in: false}.
 func (h *Handler) GetSession(w http.ResponseWriter, r *http.Request) {
-	tokenStr := extractBearerToken(r)
-	if tokenStr == "" {
-		if cookie, err := r.Cookie(cookieAccessToken); err == nil {
-			tokenStr = cookie.Value
-		}
-	}
-	if tokenStr == "" {
+	cookie, err := r.Cookie(cookieAccessToken)
+	if err != nil || cookie.Value == "" {
 		writeJSON(w, http.StatusOK, SessionResponse{LoggedIn: false})
 		return
 	}
-
-	claims, err := h.sessionSvc.ValidateAccessToken(tokenStr)
+	claims, err := h.sessionSvc.ValidateAccessToken(cookie.Value)
 	if err != nil {
 		writeJSON(w, http.StatusOK, SessionResponse{LoggedIn: false})
 		return
 	}
-
 	writeJSON(w, http.StatusOK, SessionResponse{
 		LoggedIn: true,
-		User: &UserInfo{
-			ID:    claims.UserID,
-			Email: claims.Email,
-		},
+		User:     &UserInfo{ID: claims.UserID, Email: claims.Email},
 	})
 }
 
 // PostLogin handles POST /api/auth/login.
 func (h *Handler) PostLogin(w http.ResponseWriter, r *http.Request) {
 	var req LoginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
 		return
 	}
@@ -264,22 +333,26 @@ func (h *Handler) PostLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setAuthCookies(w, accessToken, rawRefresh)
-	writeJSON(w, http.StatusOK, AuthResponse{
-		User:         UserInfo{ID: user.ID, Email: user.Email},
-		AccessToken:  accessToken,
-		RefreshToken: rawRefresh,
-	})
+	writeJSON(w, http.StatusOK, AuthResponse{User: UserInfo{ID: user.ID, Email: user.Email}})
 }
 
 // PostRegister handles POST /api/auth/register.
 func (h *Handler) PostRegister(w http.ResponseWriter, r *http.Request) {
 	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
 		return
 	}
-	if req.Email == "" || req.Password == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "email and password are required"})
+	if req.Email == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "email is required"})
+		return
+	}
+	if _, err := mail.ParseAddress(req.Email); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "email is not a valid address"})
+		return
+	}
+	if err := validatePassword(req.Password); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
 
@@ -289,10 +362,7 @@ func (h *Handler) PostRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user := &models.User{
-		Email:        req.Email,
-		PasswordHash: string(hash),
-	}
+	user := &models.User{Email: req.Email, PasswordHash: string(hash)}
 	if err := db.CreateUser(r.Context(), h.db, user); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -310,36 +380,19 @@ func (h *Handler) PostRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setAuthCookies(w, accessToken, rawRefresh)
-	writeJSON(w, http.StatusCreated, AuthResponse{
-		User:         UserInfo{ID: user.ID, Email: user.Email},
-		AccessToken:  accessToken,
-		RefreshToken: rawRefresh,
-	})
+	writeJSON(w, http.StatusCreated, AuthResponse{User: UserInfo{ID: user.ID, Email: user.Email}})
 }
 
 // PostRefresh handles POST /api/auth/refresh.
-// Validates the refresh token (from JSON body or cookie), rotates it (revoke old, issue new pair).
+// Reads the refresh token from the cookie, rotates it, and sets new cookies.
 func (h *Handler) PostRefresh(w http.ResponseWriter, r *http.Request) {
-	// Try JSON body first (Electron/Bearer clients send { "refresh_token": "..." }).
-	var rawRefreshToken string
-	var body struct {
-		RefreshToken string `json:"refresh_token"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
-		rawRefreshToken = body.RefreshToken
-	}
-	// Fall back to cookie (browser clients and Insomnia cookie jar).
-	if rawRefreshToken == "" {
-		if cookie, err := r.Cookie(cookieRefreshToken); err == nil {
-			rawRefreshToken = cookie.Value
-		}
-	}
-	if rawRefreshToken == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "refresh_token is required"})
+	cookie, err := r.Cookie(cookieRefreshToken)
+	if err != nil || cookie.Value == "" {
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "refresh cookie missing"})
 		return
 	}
 
-	hash := session.HashToken(rawRefreshToken)
+	hash := session.HashToken(cookie.Value)
 	rt, err := db.GetRefreshTokenByHash(r.Context(), h.db, hash)
 	if err != nil {
 		clearAuthCookies(w)
@@ -361,7 +414,6 @@ func (h *Handler) PostRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rotate: revoke the old token before issuing a new pair.
 	if err := db.RevokeRefreshToken(r.Context(), h.db, rt.ID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to rotate token"})
 		return
@@ -380,65 +432,42 @@ func (h *Handler) PostRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setAuthCookies(w, accessToken, rawRefresh)
-	writeJSON(w, http.StatusOK, RefreshResponse{
-		User:         UserInfo{ID: user.ID, Email: user.Email},
-		AccessToken:  accessToken,
-		RefreshToken: rawRefresh,
-	})
+	writeJSON(w, http.StatusOK, AuthResponse{User: UserInfo{ID: user.ID, Email: user.Email}})
 }
 
 // PostLogout handles POST /api/auth/logout.
-// Revokes the refresh token (from JSON body or cookie). Idempotent — succeeds even if absent or already revoked.
+// Revokes the refresh token (from cookie). Idempotent — succeeds even if absent.
 func (h *Handler) PostLogout(w http.ResponseWriter, r *http.Request) {
-	var rawToken string
-	var body struct {
-		RefreshToken string `json:"refresh_token"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
-		rawToken = body.RefreshToken
-	}
-	if rawToken == "" {
-		if cookie, err := r.Cookie(cookieRefreshToken); err == nil {
-			rawToken = cookie.Value
-		}
-	}
-
-	if rawToken != "" {
-		hash := session.HashToken(rawToken)
+	if cookie, err := r.Cookie(cookieRefreshToken); err == nil && cookie.Value != "" {
+		hash := session.HashToken(cookie.Value)
 		rt, err := db.GetRefreshTokenByHash(r.Context(), h.db, hash)
 		if err == nil && !rt.Revoked {
-			// Best-effort revocation — ignore error so logout is always idempotent.
 			_ = db.RevokeRefreshToken(r.Context(), h.db, rt.ID)
 		}
 	}
-
 	clearAuthCookies(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // PostForgotPassword handles POST /api/auth/forgot-password.
-// Issues a password-reset token. Response always looks the same to prevent email enumeration.
-// NOTE: reset_token is returned in the response body for development purposes only.
-//       In production this token would be sent via email and omitted from the response.
+//
+// TODO(forgot-password): see ForgotPasswordResponse — flow is under development.
+// Today it leaks account existence and returns reset_token in the body. Both
+// must change before production.
 func (h *Handler) PostForgotPassword(w http.ResponseWriter, r *http.Request) {
 	var req ForgotPasswordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+	if err := decodeJSON(r, &req); err != nil || req.Email == "" {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "email is required"})
 		return
 	}
 
-	// DEV MODE: return a clear 404 when the email isn't found so it's easy to spot
-	// missing accounts during development. Before shipping, replace this with a
-	// generic 200 {"message": genericMsg} response to prevent email enumeration.
 	user, err := db.GetUserByEmail(r.Context(), h.db, req.Email)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no account found with that email"})
 		return
 	}
 
-	genericMsg := "If the account exists, a reset token has been issued."
-
-	rawToken, hash, err := session.GenerateRefreshToken() // reuse the same generator
+	rawToken, hash, err := session.GenerateRefreshToken()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to generate reset token"})
 		return
@@ -451,22 +480,25 @@ func (h *Handler) PostForgotPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, ForgotPasswordResponse{
-		Message:    genericMsg,
+		Message:    "If the account exists, a reset token has been issued.",
 		ResetToken: rawToken,
 		DevNote:    "reset_token is returned in the response body for development only; this field will be removed when email delivery is added",
 	})
 }
 
 // PostResetPassword handles POST /api/auth/reset-password.
-// Validates the reset token, updates the password, and revokes all sessions.
 func (h *Handler) PostResetPassword(w http.ResponseWriter, r *http.Request) {
 	var req ResetPasswordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
 		return
 	}
-	if req.ResetToken == "" || req.NewPassword == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "reset_token and new_password are required"})
+	if req.ResetToken == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "reset_token is required"})
+		return
+	}
+	if err := validatePassword(req.NewPassword); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
 
@@ -496,16 +528,11 @@ func (h *Handler) PostResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Consume the reset token so it cannot be replayed.
-	// This must succeed — if it fails, return an error rather than letting the
-	// token remain reusable.
 	if err := db.MarkPasswordResetTokenUsed(r.Context(), h.db, prt.ID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to complete password reset"})
 		return
 	}
 
-	// Revoke all active sessions — user must log in again with the new password.
-	// Best-effort: sessions are invalidated naturally when the access token expires.
 	_ = db.RevokeAllUserRefreshTokens(r.Context(), h.db, prt.UserID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Password updated successfully. Please log in again."})
@@ -513,7 +540,6 @@ func (h *Handler) PostResetPassword(w http.ResponseWriter, r *http.Request) {
 
 // ---- Folder handlers ----
 
-// parseFolderID extracts and validates the {folderID} URL param. Returns 0 on error (response already written).
 func parseFolderID(w http.ResponseWriter, r *http.Request) int64 {
 	idStr := chi.URLParam(r, "folderID")
 	id, err := strconv.ParseInt(idStr, 10, 64)
@@ -524,8 +550,6 @@ func parseFolderID(w http.ResponseWriter, r *http.Request) int64 {
 	return id
 }
 
-// GetFolders handles GET /api/folders.
-// Returns all of the authenticated user's watched folders with aggregate stats.
 func (h *Handler) GetFolders(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 	stats, err := db.GetFolderStats(r.Context(), h.db, userID)
@@ -536,13 +560,11 @@ func (h *Handler) GetFolders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, FolderStatsResponse{Folders: stats})
 }
 
-// PostFolder handles POST /api/folders.
-// Adds a new watched directory for the authenticated user.
 func (h *Handler) PostFolder(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 
 	var req AddFolderRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
 		return
 	}
@@ -551,7 +573,6 @@ func (h *Handler) PostFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default name to last path segment when the client omits it.
 	name := req.Name
 	if name == "" {
 		name = filepath.Base(req.Path)
@@ -565,8 +586,6 @@ func (h *Handler) PostFolder(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, FolderResponse{ID: wp.ID, Path: wp.Path, Name: wp.Name, CreatedAt: wp.CreatedAt})
 }
 
-// DeleteFolder handles DELETE /api/folders/{folderID}.
-// Removes a watched folder and cleans up all its backed-up objects from storage.
 func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 	folderID := parseFolderID(w, r)
@@ -574,7 +593,6 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify ownership and get the record before deleting.
 	_, err := db.GetWatchedPathByID(r.Context(), h.db, folderID, userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -585,8 +603,6 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete each backup object from object storage before removing DB records.
-	// Best-effort — log failures but continue so the DB record is always removed.
 	if h.storage != nil {
 		backups, err := db.GetFileBackupsByWatchedPathID(r.Context(), h.db, folderID)
 		if err != nil {
@@ -611,7 +627,6 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// PutFolder handles PUT /api/folders/{id} — rename a folder.
 func (h *Handler) PutFolder(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 	folderID := parseFolderID(w, r)
@@ -620,7 +635,7 @@ func (h *Handler) PutFolder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req RenameFolderRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+	if err := decodeJSON(r, &req); err != nil || strings.TrimSpace(req.Name) == "" {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "name is required"})
 		return
 	}
@@ -636,12 +651,11 @@ func (h *Handler) PutFolder(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// PutAccountEmail handles PUT /api/account/email — change email address.
 func (h *Handler) PutAccountEmail(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 
 	var req ChangeEmailRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
 		return
 	}
@@ -676,17 +690,20 @@ func (h *Handler) PutAccountEmail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"email": strings.TrimSpace(req.NewEmail)})
 }
 
-// PutAccountPassword handles PUT /api/account/password — change password while logged in.
 func (h *Handler) PutAccountPassword(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 
 	var req ChangePasswordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
 		return
 	}
-	if req.CurrentPassword == "" || req.NewPassword == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "current_password and new_password are required"})
+	if req.CurrentPassword == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "current_password is required"})
+		return
+	}
+	if err := validatePassword(req.NewPassword); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
 
@@ -710,19 +727,17 @@ func (h *Handler) PutAccountPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Revoke all sessions so re-login is required on other devices.
 	if err := db.RevokeAllUserRefreshTokens(r.Context(), h.db, userID); err != nil {
 		log.Printf("warn: failed to revoke tokens after password change for user %d: %v", userID, err)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// DeleteAccount handles DELETE /api/account — permanently delete the account and all data.
 func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 
 	var req DeleteAccountRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
 		return
 	}
@@ -741,7 +756,6 @@ func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete all backup objects from storage (best-effort).
 	if h.storage != nil {
 		if delErr := h.storage.DeleteUserObjects(r.Context(), userID); delErr != nil {
 			log.Printf("warn: failed to delete storage objects for user %d during account deletion: %v", userID, delErr)
@@ -757,8 +771,6 @@ func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// requireFolder is a helper used by per-folder handlers: it parses the folderID,
-// verifies ownership, and returns the WatchedPath. Returns nil (response already written) on error.
 func (h *Handler) requireFolder(w http.ResponseWriter, r *http.Request, userID int64) *models.WatchedPath {
 	folderID := parseFolderID(w, r)
 	if folderID == 0 {
@@ -776,7 +788,6 @@ func (h *Handler) requireFolder(w http.ResponseWriter, r *http.Request, userID i
 	return wp
 }
 
-// GetFiles handles GET /api/folders/{folderID}/files.
 func (h *Handler) GetFiles(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 	wp := h.requireFolder(w, r, userID)
@@ -791,7 +802,6 @@ func (h *Handler) GetFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, WatchedFilesResponse{Files: files})
 }
 
-// PutSyncFiles handles PUT /api/folders/{folderID}/sync.
 func (h *Handler) PutSyncFiles(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 	wp := h.requireFolder(w, r, userID)
@@ -799,8 +809,12 @@ func (h *Handler) PutSyncFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sync payloads can be large for big trees — bump the cap.
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20) // 32 MiB
 	var req SyncWatchedFilesRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&req); err != nil {
+		log.Printf("debug: sync decode failed: %v", err)
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
 		return
 	}
@@ -828,15 +842,12 @@ func (h *Handler) PutSyncFiles(w http.ResponseWriter, r *http.Request) {
 
 // ---- Backup handlers ----
 
-// HistoryResponse is returned by GET /api/history.
 type HistoryResponse struct {
 	Items  []db.HistoryItem `json:"items"`
 	Limit  int              `json:"limit"`
 	Offset int              `json:"offset"`
 }
 
-// GetBackupHistory handles GET /api/history.
-// Query params: folder_id (int, optional), limit (int, default 50, max 200), offset (int, default 0).
 func (h *Handler) GetBackupHistory(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 
@@ -858,12 +869,10 @@ func (h *Handler) GetBackupHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, HistoryResponse{Items: items, Limit: limit, Offset: offset})
 }
 
-// FileVersionsResponse is returned by GET /api/folders/{folderID}/versions.
 type FileVersionsResponse struct {
 	Versions []db.FileVersion `json:"versions"`
 }
 
-// GetFileVersions handles GET /api/folders/{folderID}/versions?path=relative_path.
 func (h *Handler) GetFileVersions(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 	wp := h.requireFolder(w, r, userID)
@@ -883,8 +892,6 @@ func (h *Handler) GetFileVersions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, FileVersionsResponse{Versions: versions})
 }
 
-// GetFileVersionDownload handles GET /api/folders/{folderID}/versions/{versionID}.
-// Streams the specific version's object from storage back to the client.
 func (h *Handler) GetFileVersionDownload(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 	wp := h.requireFolder(w, r, userID)
@@ -915,10 +922,11 @@ func (h *Handler) GetFileVersionDownload(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("X-Backup-Version", strconv.Itoa(v.Version))
 	w.Header().Set("X-Checksum-SHA256", v.ChecksumSHA256)
 	w.Header().Set("Content-Length", strconv.FormatInt(v.Size, 10))
-	io.Copy(w, obj) //nolint:errcheck
+	if _, err := io.Copy(w, obj); err != nil {
+		log.Printf("warn: short copy on version download key=%q err=%v", v.ObjectKey, err)
+	}
 }
 
-// GetFileBackups handles GET /api/folders/{folderID}/backups.
 func (h *Handler) GetFileBackups(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromContext(r.Context())
 	wp := h.requireFolder(w, r, userID)
@@ -936,14 +944,9 @@ func (h *Handler) GetFileBackups(w http.ResponseWriter, r *http.Request) {
 // PutFileBackup handles PUT /api/folders/{folderID}/backup/*.
 // Streams the request body into object storage. Skips when checksum matches.
 func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
-	// Validate inputs before any DB access so unit tests with nil DB can cover these checks.
-	relativePath := chi.URLParam(r, "*")
-	if relativePath == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "relative_path is required"})
-		return
-	}
-	if strings.Contains(relativePath, "..") || strings.Contains(filepath.Clean("/"+relativePath), "..") {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid relative_path"})
+	relativePath, err := validateRelativePath(chi.URLParam(r, "*"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
 
@@ -959,6 +962,10 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "X-File-Size header is required and must be a non-negative integer"})
 		return
 	}
+	if fileSize > maxBackupSize {
+		writeJSON(w, http.StatusRequestEntityTooLarge, ErrorResponse{Error: "file exceeds maximum allowed size"})
+		return
+	}
 
 	userID := userIDFromContext(r.Context())
 	wp := h.requireFolder(w, r, userID)
@@ -966,8 +973,8 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	existing, err := db.GetFileBackup(r.Context(), h.db, wp.ID, relativePath)
-	if err == nil && existing.ChecksumSHA256 == checksum {
+	existing, lookupErr := db.GetFileBackup(r.Context(), h.db, wp.ID, relativePath)
+	if lookupErr == nil && existing.ChecksumSHA256 == checksum {
 		writeJSON(w, http.StatusOK, UploadFileResponse{
 			RelativePath:   existing.RelativePath,
 			Size:           existing.Size,
@@ -979,14 +986,22 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	objectKey := storage.ObjectKey(userID, wp.ID, relativePath)
+	objectKey, err := storage.ObjectKey(userID, wp.ID, relativePath)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		return
+	}
 
-	// If a prior backup exists with a different key (e.g. legacy 2-part format), delete
-	// the old object after the new one is written so storage doesn't accumulate orphans.
+	// If a prior backup exists with a different key (e.g. legacy 2-part format),
+	// queue its old object for deletion after the new write succeeds.
 	var oldKey string
-	if err == nil && existing.ObjectKey != objectKey {
+	if lookupErr == nil && existing.ObjectKey != objectKey {
 		oldKey = existing.ObjectKey
 	}
+
+	// Cap the body at the declared size + a small slack to defend against malicious
+	// content-length lies. MinIO uses size to drive multipart and short-reads error.
+	r.Body = http.MaxBytesReader(w, r.Body, fileSize+1024)
 
 	if err := h.storage.PutObject(r.Context(), objectKey, r.Body, fileSize, "application/octet-stream"); err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "upload failed"})
@@ -1022,16 +1037,10 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetFileBackup handles GET /api/folders/{folderID}/backup/*.
 func (h *Handler) GetFileBackup(w http.ResponseWriter, r *http.Request) {
-	// Validate path before any DB access so unit tests with nil DB can cover these checks.
-	relativePath := chi.URLParam(r, "*")
-	if relativePath == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "relative_path is required"})
-		return
-	}
-	if strings.Contains(relativePath, "..") || strings.Contains(filepath.Clean("/"+relativePath), "..") {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid relative_path"})
+	relativePath, err := validateRelativePath(chi.URLParam(r, "*"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
 
@@ -1063,7 +1072,9 @@ func (h *Handler) GetFileBackup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
-	io.Copy(w, reader) //nolint:errcheck — response already started, can't change status
+	if _, err := io.Copy(w, reader); err != nil {
+		log.Printf("warn: short copy on backup download key=%q err=%v", backup.ObjectKey, err)
+	}
 }
 
 // ---- Helpers ----
@@ -1089,6 +1100,9 @@ func (h *Handler) issueTokenPair(r *http.Request, user *models.User) (accessToke
 	return accessToken, rawRefresh, nil
 }
 
+// setAuthCookies installs both cookies with SameSite=Strict + HttpOnly.
+// Secure is set in production (env COOKIE_SECURE=true). Path=/ on both so
+// /api/auth/logout can clear them without path acrobatics.
 func setAuthCookies(w http.ResponseWriter, accessToken, rawRefresh string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieAccessToken,
@@ -1096,32 +1110,28 @@ func setAuthCookies(w http.ResponseWriter, accessToken, rawRefresh string) {
 		Path:     "/",
 		MaxAge:   int(session.AccessTokenTTL.Seconds()),
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		Secure:   secureCookies,
+		SameSite: http.SameSiteStrictMode,
 	})
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieRefreshToken,
 		Value:    rawRefresh,
-		Path:     "/api/auth/refresh",
+		Path:     "/",
 		MaxAge:   int(session.RefreshTokenTTL.Seconds()),
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		Secure:   secureCookies,
+		SameSite: http.SameSiteStrictMode,
 	})
 }
 
 func clearAuthCookies(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     cookieAccessToken,
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		Name: cookieAccessToken, Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: secureCookies, SameSite: http.SameSiteStrictMode,
 	})
 	http.SetCookie(w, &http.Cookie{
-		Name:     cookieRefreshToken,
-		Path:     "/api/auth/refresh",
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		Name: cookieRefreshToken, Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: secureCookies, SameSite: http.SameSiteStrictMode,
 	})
 }
 

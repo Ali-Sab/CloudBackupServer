@@ -13,8 +13,7 @@
   const _mod = (typeof require !== 'undefined' && typeof module !== 'undefined')
     ? require('./api-client')
     : null;
-  const APIClient   = _mod ? _mod.APIClient   : window.APIClient;
-  const TokenStore  = _mod ? _mod.TokenStore  : window.TokenStore;
+  const APIClient = _mod ? _mod.APIClient : window.APIClient;
 
   const API = {
 
@@ -35,8 +34,7 @@
     },
 
     logout() {
-      const refreshToken = TokenStore.getRefreshToken();
-      return APIClient.post('/api/auth/logout', refreshToken ? { refresh_token: refreshToken } : {});
+      return APIClient.post('/api/auth/logout', {});
     },
 
     forgotPassword(email) {

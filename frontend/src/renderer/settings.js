@@ -16,6 +16,7 @@
     theme:         'theme',
     notifications: 'settings_notifications',
     serverUrl:     'settings_server_url',
+    autoBackup:    'settings_auto_backup',
   };
 
   function getPref(key, defaultVal) {
@@ -33,6 +34,7 @@
     const currentTheme         = getPref(STORAGE_KEYS.theme, 'dark');
     const notificationsEnabled = getPref(STORAGE_KEYS.notifications, 'true') === 'true';
     const serverUrl            = getPref(STORAGE_KEYS.serverUrl, 'http://localhost:8080');
+    const autoBackupEnabled    = getPref(STORAGE_KEYS.autoBackup, 'true') === 'true';
 
     el.innerHTML = `
       <div class="settings-panel">
@@ -52,6 +54,20 @@
               <button class="settings-toggle-btn ${currentTheme !== 'light' ? 'active' : ''}" data-theme="dark" id="theme-dark-btn">🌙 Dark</button>
               <button class="settings-toggle-btn ${currentTheme === 'light' ? 'active' : ''}" data-theme="light" id="theme-light-btn">☀️ Light</button>
             </div>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3 class="settings-section-title">Backups</h3>
+          <div class="settings-row">
+            <div class="settings-row-label">
+              <span>Auto-backup on file change</span>
+              <span class="settings-row-hint">Upload changed files automatically a few seconds after they change</span>
+            </div>
+            <label class="settings-switch" aria-label="Enable auto-backup">
+              <input type="checkbox" id="auto-backup-toggle" ${autoBackupEnabled ? 'checked' : ''} />
+              <span class="settings-switch-track"></span>
+            </label>
           </div>
         </section>
 
@@ -81,7 +97,7 @@
               <button id="server-url-save-btn" class="settings-save-btn">Save</button>
             </div>
             <div class="form-error" id="server-url-error"></div>
-            <p class="settings-row-hint settings-restart-note">Changes take effect after restarting the app.</p>
+            <p class="settings-row-hint settings-restart-note">Changes take effect immediately for new requests.</p>
           </div>
         </section>
       </div>
@@ -92,6 +108,9 @@
     document.getElementById('theme-light-btn').addEventListener('click', function () { applyTheme('light'); });
     document.getElementById('notifications-toggle').addEventListener('change', function (e) {
       setPref(STORAGE_KEYS.notifications, e.target.checked ? 'true' : 'false');
+    });
+    document.getElementById('auto-backup-toggle').addEventListener('change', function (e) {
+      setPref(STORAGE_KEYS.autoBackup, e.target.checked ? 'true' : 'false');
     });
     document.getElementById('server-url-save-btn').addEventListener('click', saveServerUrl);
   }
@@ -132,9 +151,11 @@
     }
 
     setPref(STORAGE_KEYS.serverUrl, val);
+    // Apply immediately — no restart needed.
+    if (window.APIClient) window.APIClient.BASE_URL = val;
     btn.textContent = 'Saved ✓';
     setTimeout(function () { btn.textContent = 'Save'; }, 2000);
-    window.UI.toast('Server URL saved — restart the app to connect', 'success');
+    window.UI.toast('Server URL updated', 'success');
   }
 
   // ---- Public interface ------------------------------------------------------

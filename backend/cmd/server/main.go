@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/ali-sab/cloudbackupserver/backend/internal/api"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/db"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/session"
@@ -24,14 +26,20 @@ func main() {
 		port = "8080"
 	}
 
-	// Run database migrations (idempotent — safe on every startup)
+	// Tighten CORS / CSRF allowlist. Defaults to http://localhost:5173 (dev).
+	if origins := os.Getenv("ALLOWED_ORIGINS"); origins != "" {
+		api.SetAllowedOrigins(origins)
+	}
+
+	// COOKIE_SECURE flips Set-Cookie's Secure flag; must be true behind HTTPS.
+	api.SetSecureCookies(os.Getenv("COOKIE_SECURE") == "true")
+
 	log.Println("Running database migrations...")
 	if err := db.RunMigrations(databaseURL); err != nil {
 		log.Fatalf("Migration failed: %v", err)
 	}
 	log.Println("Migrations complete")
 
-	// Connect to the database
 	ctx := context.Background()
 	pool, err := db.Connect(ctx, databaseURL)
 	if err != nil {
@@ -39,7 +47,6 @@ func main() {
 	}
 	defer pool.Close()
 
-	// Connect to object storage
 	store, err := storage.New(
 		mustEnv("MINIO_ENDPOINT"),
 		mustEnv("MINIO_ACCESS_KEY"),
@@ -51,27 +58,27 @@ func main() {
 		log.Fatalf("Storage init failed: %v", err)
 	}
 
-	// Wire up application
 	sessionSvc := session.NewService(jwtSecret)
 	router := api.NewRouter(pool, sessionSvc, store)
 
 	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: router,
-		// No read/write timeouts — uploads and downloads can be arbitrarily large.
-		// ReadHeaderTimeout still protects against Slowloris-style header attacks.
+		Addr:              ":" + port,
+		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
-	// Start server in background
+	// Periodic cleanup of expired refresh tokens. Runs once at startup, then hourly.
+	cleanupCtx, cancelCleanup := context.WithCancel(context.Background())
+	defer cancelCleanup()
+	go runRefreshCleanup(cleanupCtx, pool)
+
 	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("Server listening on :%s", port)
 		serverErr <- srv.ListenAndServe()
 	}()
 
-	// Block until interrupt or server error
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -89,6 +96,30 @@ func main() {
 		log.Fatalf("Graceful shutdown failed: %v", err)
 	}
 	log.Println("Server stopped")
+}
+
+func runRefreshCleanup(ctx context.Context, pool *pgxpool.Pool) {
+	tick := func() {
+		n, err := db.CleanupExpiredRefreshTokens(ctx, pool, 7*24*time.Hour)
+		if err != nil {
+			log.Printf("warn: refresh token cleanup failed: %v", err)
+			return
+		}
+		if n > 0 {
+			log.Printf("info: cleaned up %d expired refresh tokens", n)
+		}
+	}
+	tick()
+	t := time.NewTicker(1 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			tick()
+		}
+	}
 }
 
 func mustEnv(key string) string {

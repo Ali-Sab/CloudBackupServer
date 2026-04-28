@@ -1,6 +1,8 @@
 package api
 
 import (
+	"os"
+
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,21 +22,25 @@ func NewRouter(pool *pgxpool.Pool, sessionSvc *session.Service, store storage.Ba
 }
 
 func newRouter(h *Handler) *chi.Mux {
+	// Per-IP limiter for unauthenticated auth endpoints. Tunable from env later.
+	disableRL := os.Getenv("DISABLE_RATE_LIMIT") == "true"
+	authLimiter := newRateLimiter(60, 10, disableRL)
 
 	r := chi.NewRouter()
 
-	// Global middleware
 	r.Use(chimiddleware.RequestID)
 	r.Use(chimiddleware.RealIP)
 	r.Use(chimiddleware.Logger)
 	r.Use(chimiddleware.Recoverer)
 	r.Use(corsMiddleware)
+	r.Use(csrfMiddleware)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", h.GetHealth)
 		r.Get("/session", h.GetSession)
 
 		r.Route("/auth", func(r chi.Router) {
+			r.Use(rateLimit(authLimiter))
 			r.Post("/login", h.PostLogin)
 			r.Post("/register", h.PostRegister)
 			r.Post("/refresh", h.PostRefresh)

@@ -21,16 +21,31 @@ const http = require('http');
 
 const MAIN_JS  = path.resolve(__dirname, '../src/main.js');
 const BASE_URL = process.env.API_BASE_URL || 'http://localhost:8080';
+// Same-site origin every request advertises (in backend's ALLOWED_ORIGINS).
+const ORIGIN   = process.env.E2E_ORIGIN || 'http://localhost:5173';
 
 // ---- HTTP helpers ------------------------------------------------------------
+//
+// Cookie-only auth: the third arg ("auth") is now a `Cookie` header string
+// captured from a prior register/login response — not a Bearer token.
 
-function httpRequest(method, urlPath, body, authToken) {
+/** Extract an opaque "name=value; name=value" Cookie header from Set-Cookie response headers. */
+function cookieJarFromSetCookie(setCookieHeaders) {
+  if (!setCookieHeaders) return '';
+  const list = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+  return list
+    .map(h => String(h).split(';')[0])    // drop attributes (Path=/, HttpOnly, …)
+    .filter(Boolean)
+    .join('; ');
+}
+
+function httpRequest(method, urlPath, body, cookies) {
   return new Promise((resolve, reject) => {
     const data   = body ? JSON.stringify(body) : null;
     const parsed = new URL(`${BASE_URL}${urlPath}`);
-    const headers = { 'Content-Type': 'application/json' };
+    const headers = { 'Content-Type': 'application/json', 'Origin': ORIGIN };
     if (data) headers['Content-Length'] = Buffer.byteLength(data);
-    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+    if (cookies) headers['Cookie'] = cookies;
 
     const req = http.request(
       { hostname: parsed.hostname, port: Number(parsed.port) || 80,
@@ -39,8 +54,12 @@ function httpRequest(method, urlPath, body, authToken) {
         let raw = '';
         res.on('data', c => { raw += c; });
         res.on('end', () => {
-          try { resolve({ status: res.statusCode, body: JSON.parse(raw) }); }
-          catch { resolve({ status: res.statusCode, body: {} }); }
+          const cookieHeader = cookieJarFromSetCookie(res.headers['set-cookie']);
+          try {
+            resolve({ status: res.statusCode, body: JSON.parse(raw), cookies: cookieHeader });
+          } catch {
+            resolve({ status: res.statusCode, body: {}, cookies: cookieHeader });
+          }
         });
       }
     );
@@ -50,12 +69,12 @@ function httpRequest(method, urlPath, body, authToken) {
   });
 }
 
-const httpPost   = (path, body, token) => httpRequest('POST',   path, body, token);
-const httpGet    = (path, token)        => httpRequest('GET',    path, null, token);
-const httpDelete = (path, token)        => httpRequest('DELETE', path, null, token);
+const httpPost   = (path, body, cookies) => httpRequest('POST',   path, body, cookies);
+const httpGet    = (path, cookies)        => httpRequest('GET',    path, null, cookies);
+const httpDelete = (path, cookies)        => httpRequest('DELETE', path, null, cookies);
 
 /** Upload raw file bytes to a backup endpoint. Returns { status, body }. */
-function httpUploadFile(urlPath, content, token) {
+function httpUploadFile(urlPath, content, cookies) {
   return new Promise((resolve, reject) => {
     const buf    = Buffer.isBuffer(content) ? content : Buffer.from(content);
     const sha256 = require('crypto').createHash('sha256').update(buf).digest('hex');
@@ -65,7 +84,8 @@ function httpUploadFile(urlPath, content, token) {
       'Content-Length': String(buf.length),
       'X-Checksum-SHA256': sha256,
       'X-File-Size': String(buf.length),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      'Origin': ORIGIN,
+      ...(cookies ? { Cookie: cookies } : {}),
     };
     const req = http.request(
       { hostname: parsed.hostname, port: Number(parsed.port) || 80,
@@ -95,10 +115,19 @@ function makeTempBackupDir() {
   return dir;
 }
 
-/** Launch the Electron app, pointing E2E_SELECT_DIR at tmpDir. */
+/**
+ * Launch the Electron app, pointing E2E_SELECT_DIR at tmpDir.
+ *
+ * Cookie auth is now session-persistent (the Electron session cookie store
+ * survives across launches), so every test gets its OWN userDataDir by
+ * default — otherwise a successful login in test N keeps test N+1 logged in
+ * and the login form never appears. T12 opts in to a shared dir to verify
+ * the persistence behavior.
+ */
 function launchApp(tmpDir, { userDataDir } = {}) {
+  const dataDir = userDataDir || fs.mkdtempSync(path.join(os.tmpdir(), 'e2e-userdata-'));
   return electron.launch({
-    args: [MAIN_JS, ...(userDataDir ? [`--user-data-dir=${userDataDir}`] : [])],
+    args: [MAIN_JS, `--user-data-dir=${dataDir}`],
     env: {
       ...process.env,
       NODE_ENV: 'test',
@@ -108,8 +137,11 @@ function launchApp(tmpDir, { userDataDir } = {}) {
 }
 
 /**
- * Register a fresh isolated user and return { email, password, token }.
+ * Register a fresh isolated user and return { email, password, cookies }.
  * Each test that mutates state uses its own user so tests don't interfere.
+ *
+ * `cookies` is the captured Set-Cookie value as a `Cookie` header string —
+ * pass it as the third arg to httpPost/httpGet/etc. for authenticated calls.
  */
 async function registerFreshUser(suffix) {
   const ts  = Date.now();
@@ -118,7 +150,9 @@ async function registerFreshUser(suffix) {
   const password = `E2ePass_${ts}!`;
   const res = await httpPost('/api/auth/register', { email, password });
   if (res.status !== 201) throw new Error(`Registration failed: HTTP ${res.status}`);
-  return { email, password, token: res.body.access_token };
+  // `token` is kept as an alias for `cookies` so existing call sites work
+  // unchanged; both refer to the captured Cookie header string.
+  return { email, password, cookies: res.cookies, token: res.cookies };
 }
 
 /** Log in via the UI login form. Assumes the form is already visible. */
@@ -270,9 +304,10 @@ test('T6: Backup Now uploads files and shows result toast', async () => {
   await page.click('#backup-now-btn');
 
   // A toast with "Backup:" appears when done (allow 20 s for local HTTP uploads).
-  await page.waitForSelector('.toast-visible', { timeout: 20_000 });
-  const toastText = await page.locator('.toast-visible').first().textContent();
-  expect(toastText).toMatch(/Backup:/);
+  // Use a text filter so a concurrent watch-failed toast (Linux CI) is not matched.
+  const backupToast = page.locator('.toast-visible', { hasText: /Backup:/ });
+  await backupToast.waitFor({ timeout: 20_000 });
+  expect(await backupToast.first().textContent()).toMatch(/Backup:/);
 
   // Button must revert.
   await expect(page.locator('#backup-now-btn')).toHaveText('Backup Now', { timeout: 8_000 });
@@ -387,46 +422,28 @@ test('T10: clicking a file name calls shell.openPath with the correct absolute p
   expect(openedPath.startsWith(tmpDir)).toBe(true);
 });
 
-// ---- T11: Remember me checkbox appears on login form ------------------------
+// ---- T11: (removed) Remember-me checkbox ------------------------------------
+// ---- T12: Cookie persistence — relaunch keeps the user signed in ------------
 
-test('T11: remember-me checkbox is visible on the login form in Electron', async () => {
+test('T12: after login, relaunching with the same userData keeps the session', async () => {
   test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
-
-  // The checkbox is only shown when safeStorage is available; skip if not.
-  const available = await app.evaluate(({ safeStorage }) => safeStorage.isEncryptionAvailable());
-  test.skip(!available, 'safeStorage not available on this platform');
-
-  await page.waitForSelector('#login-form', { timeout: 10_000 });
-  await expect(page.locator('#remember-me')).toBeVisible();
-});
-
-// ---- T12: Remember me — relaunch auto-logs in --------------------------------
-
-test('T12: logging in with remember-me checked auto-logs in on next launch', async () => {
-  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
-
-  const available = await app.evaluate(({ safeStorage }) => safeStorage.isEncryptionAvailable());
-  test.skip(!available, 'safeStorage not available on this platform');
 
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e2e-userdata-'));
   try {
-    // Close the default per-test app; we need one pinned to userDataDir.
     await app.close();
     app = await launchApp(tmpDir, { userDataDir });
     page = await app.firstWindow();
     await page.waitForLoadState('domcontentloaded');
 
-    const { email, password } = await registerFreshUser('rememberme');
+    const { email, password } = await registerFreshUser('cookiepersist');
 
-    // Login with remember-me checked.
     await page.waitForSelector('#login-form', { timeout: 10_000 });
     await page.fill('#email', email);
     await page.fill('#password', password);
-    await page.check('#remember-me');
     await page.click('#login-form button[type="submit"]');
     await page.waitForSelector('#header-avatar', { timeout: 10_000 });
 
-    // Close and relaunch with the same userData — expect auto-login.
+    // Close and relaunch — the Electron session persists cookies on disk.
     await app.close();
     app = await launchApp(tmpDir, { userDataDir });
     page = await app.firstWindow();
@@ -481,9 +498,10 @@ test('T15: keyboard shortcut "b" triggers Backup Now in the file browser', async
   await page.keyboard.press('b');
 
   // A toast with backup results must appear.
-  await page.waitForSelector('.toast-visible', { timeout: 20_000 });
-  const toastText = await page.locator('.toast-visible').first().textContent();
-  expect(toastText).toMatch(/Backup:/);
+  // Use a text filter so a concurrent watch-failed toast (Linux CI) is not matched.
+  const backupToast = page.locator('.toast-visible', { hasText: /Backup:/ });
+  await backupToast.waitFor({ timeout: 20_000 });
+  expect(await backupToast.first().textContent()).toMatch(/Backup:/);
 
   // Button must revert to idle state.
   await expect(page.locator('#backup-now-btn')).toHaveText('Backup Now', { timeout: 8_000 });
@@ -623,8 +641,9 @@ test('T19: settings panel opens via the ⚙️ button and shows appearance contr
   await expect(page.locator('#theme-dark-btn')).toBeVisible();
   await expect(page.locator('#theme-light-btn')).toBeVisible();
 
-  // Notifications toggle switch must be present (the checkbox itself is visually hidden by CSS).
-  await expect(page.locator('.settings-switch')).toBeVisible();
+  // Toggle switches must be present (the checkboxes themselves are visually hidden by CSS).
+  await expect(page.getByLabel('Enable auto-backup')).toBeVisible();
+  await expect(page.getByLabel('Enable desktop notifications')).toBeVisible();
 
   // Close button returns to dashboard.
   await page.click('#settings-close-btn');

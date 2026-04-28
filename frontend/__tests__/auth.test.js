@@ -1,18 +1,15 @@
 /**
- * Unit tests for auth.js pure functions: renderSessionState, escapeHtml.
+ * Unit tests for auth.js pure functions: renderSessionState, escapeHtml, passwordStrength.
  * All tests run in Jest/jsdom — no real backend or Electron required.
  */
 
 'use strict';
 
-// Prevent the browser-only DOM block from running during import
 global.window = global.window || {};
 window._testMode = true;
 
-// Provide stubs so api-client.js and api.js load cleanly
-const { APIClient, TokenStore, AuthExpiredError, escapeHtml } = require('../src/renderer/api-client');
+const { APIClient, AuthExpiredError, escapeHtml } = require('../src/renderer/api-client');
 global.APIClient = APIClient;
-global.TokenStore = TokenStore;
 global.AuthExpiredError = AuthExpiredError;
 global.escapeHtml = escapeHtml;
 
@@ -25,9 +22,7 @@ global.API = {
   resetPassword: jest.fn(),
 };
 
-const { renderSessionState } = require('../src/renderer/auth');
-
-// ---- renderSessionState ----
+const { renderSessionState, passwordStrength } = require('../src/renderer/auth');
 
 describe('renderSessionState', () => {
   test('returns logged-out when not authenticated', () => {
@@ -55,8 +50,6 @@ describe('renderSessionState', () => {
   });
 });
 
-// ---- escapeHtml ----
-
 describe('escapeHtml', () => {
   test('escapes < and > characters', () => {
     expect(escapeHtml('<script>')).not.toContain('<script>');
@@ -74,5 +67,25 @@ describe('escapeHtml', () => {
   test('coerces non-string input to string without throwing', () => {
     expect(() => escapeHtml(42)).not.toThrow();
     expect(escapeHtml(42)).toBe('42');
+  });
+});
+
+describe('passwordStrength', () => {
+  test('empty input is score 0', () => {
+    expect(passwordStrength('').score).toBe(0);
+  });
+
+  test('"password" lands somewhere in the middle', () => {
+    const r = passwordStrength('password');
+    expect(r.score).toBeGreaterThanOrEqual(1);
+    expect(r.score).toBeLessThanOrEqual(2);
+  });
+
+  test('long varied passwords score high', () => {
+    expect(passwordStrength('Tr0ub4dor&3xtra').score).toBe(4);
+  });
+
+  test('short passwords score low', () => {
+    expect(passwordStrength('abc').score).toBeLessThanOrEqual(1);
   });
 });

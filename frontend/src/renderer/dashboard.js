@@ -240,6 +240,7 @@ if (typeof module !== 'undefined') {
           </div>
         </div>
         <div class="folder-card-actions">
+          <button class="backup-folder-btn" title="Back up this folder now">↑ Backup</button>
           <button class="open-folder-btn">Open</button>
           <button class="rename-folder-btn">Rename</button>
           <button class="remove-folder-btn">Remove</button>
@@ -283,7 +284,67 @@ if (typeof module !== 'undefined') {
       handleRemoveFolder(folder.id, name, folder.path);
     });
 
+    card.querySelector('.backup-folder-btn').addEventListener('click', function () {
+      handleBackupFolder(folder, card);
+    });
+
     return card;
+  }
+
+  // ---- Backup-from-dashboard ----------------------------------------------
+  // Performs a one-shot backup of the entire folder tree without opening it.
+  // Shares the upload IPC used by the file browser.
+
+  async function handleBackupFolder(folder, card) {
+    const btn = card.querySelector('.backup-folder-btn');
+    const originalText = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Reading…'; }
+
+    let entries;
+    try {
+      entries = await window.electronAPI.readDirectory(folder.path);
+    } catch {
+      window.UI.toast('Could not read folder', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = originalText; }
+      return;
+    }
+
+    const fileEntries = entries.filter(function (e) { return !e.isDirectory; });
+    if (fileEntries.length === 0) {
+      window.UI.toast('No files to back up in "' + (folder.name || lastSegment(folder.path)) + '"');
+      if (btn) { btn.disabled = false; btn.textContent = originalText; }
+      return;
+    }
+
+    const uploadBase = window.APIClient.BASE_URL + '/api/folders/' + folder.id + '/backup';
+    let uploaded = 0, skipped = 0, failed = 0;
+    if (btn) btn.textContent = '0 / ' + fileEntries.length;
+
+    for (let i = 0; i < fileEntries.length; i++) {
+      const entry = fileEntries[i];
+      let result;
+      try {
+        result = await window.electronAPI.uploadFile(folder.path, entry.relativePath, uploadBase);
+      } catch (err) {
+        result = { error: err.message };
+      }
+      if (result.error) failed++;
+      else if (result.skipped) skipped++;
+      else uploaded++;
+      if (btn) btn.textContent = (i + 1) + ' / ' + fileEntries.length;
+    }
+
+    const parts = [];
+    if (uploaded) parts.push(uploaded + ' uploaded');
+    if (skipped)  parts.push(skipped  + ' unchanged');
+    if (failed)   parts.push(failed   + ' failed');
+    window.UI.toast('Backup of "' + (folder.name || lastSegment(folder.path)) + '": ' + parts.join(', '),
+      failed > 0 ? 'error' : 'success');
+
+    if (btn) { btn.disabled = false; btn.textContent = originalText; }
+
+    // Refresh stats to reflect the new last-backup time.
+    loadAndRenderFolders();
   }
 
   // ---- Actions ------------------------------------------------------------
@@ -357,6 +418,8 @@ if (typeof module !== 'undefined') {
       actionsDiv.querySelector('.remove-folder-btn').addEventListener('click', function () {
         handleRemoveFolder(folder.id, nameDiv.textContent, folder.path);
       });
+      const bb = actionsDiv.querySelector('.backup-folder-btn');
+      if (bb) bb.addEventListener('click', function () { handleBackupFolder(folder, card); });
     }
 
     cancelBtn.addEventListener('click', restore);

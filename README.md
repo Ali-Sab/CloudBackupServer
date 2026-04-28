@@ -84,25 +84,26 @@ The full OpenAPI 3.0 specification lives at [`backend/api/openapi.yaml`](backend
 | `GET` | `/api/files/` | Bearer token | Get the last-synced file list |
 | `PUT` | `/api/files/sync` | Bearer token | Replace the stored file list (full sync) |
 
-Authentication uses a **two-token scheme**:
-- **Access token** — short-lived JWT (1 minute). Pass as `Authorization: Bearer <token>`.
-- **Refresh token** — long-lived opaque token (30 days). Use `/api/auth/refresh` to get a new pair without re-entering credentials.
+Authentication is **cookie-only** with a two-token scheme:
+- **Access token** — short-lived JWT (5 minutes), in the HttpOnly `access_token` cookie.
+- **Refresh token** — long-lived opaque token (30 days), in the HttpOnly `refresh_token` cookie.
+
+Cookies are set with `SameSite=Strict; HttpOnly` (and `Secure` when `COOKIE_SECURE=true`).
+Mutating requests are additionally protected by an `Origin`/`Referer` allowlist
+(`ALLOWED_ORIGINS` env). There is no `Authorization: Bearer` path.
 
 ### Quick examples
 
 ```bash
-# Register
-curl -s -X POST http://localhost:8080/api/auth/register \
+# Register (cookies are returned via Set-Cookie headers)
+curl -s -c /tmp/cookies.txt \
+  -H 'Origin: http://localhost:5173' \
+  -X POST http://localhost:8080/api/auth/register \
   -H 'Content-Type: application/json' \
   -d '{"email":"alice@example.com","password":"hunter2"}' | jq .
 
-# Login
-TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"alice@example.com","password":"hunter2"}' | jq -r .access_token)
-
-# Authenticated session check
-curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/session | jq .
+# Authenticated session check (uses the cookie jar)
+curl -s -b /tmp/cookies.txt http://localhost:8080/api/session | jq .
 ```
 
 ---
@@ -164,6 +165,8 @@ make test-integration
 | `POSTGRES_PASSWORD` | `cloudbackup_dev` | Postgres password (docker compose) |
 | `POSTGRES_PORT` | `5432` | Exposed postgres port (docker compose) |
 | `BACKEND_PORT` | `8080` | Exposed backend port (docker compose) |
+| `ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | CORS / CSRF origin allowlist (comma-separated) |
+| `COOKIE_SECURE` | `false` | Set `true` in production behind HTTPS |
 
 Generate a secure JWT secret:
 
