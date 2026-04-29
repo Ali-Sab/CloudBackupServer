@@ -1,11 +1,12 @@
 .PHONY: build run test test-integration deps lint clean help
 
-BIN := bin/server
+BIN     := bin/server
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
 ## build: compile the server binary
 build:
 	@mkdir -p bin
-	go build -ldflags="-s -w" -o $(BIN) ./cmd/server
+	go build -ldflags="-s -w -X 'github.com/ali-sab/cloudbackupserver/backend/internal/api.Version=$(VERSION)'" -o $(BIN) ./cmd/server
 
 ## run: run the server locally (requires DATABASE_URL and JWT_SECRET env vars)
 run:

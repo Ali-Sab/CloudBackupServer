@@ -5,6 +5,8 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +29,12 @@ import (
 	"github.com/ali-sab/cloudbackupserver/backend/internal/session"
 	"github.com/ali-sab/cloudbackupserver/backend/internal/storage"
 )
+
+// sha256hex returns the hex-encoded SHA-256 hash of b.
+func sha256hex(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
 
 // ---- In-memory storage mock ----
 
@@ -602,7 +610,7 @@ func TestIntegration_Folder_DeleteAndVerify(t *testing.T) {
 	folderID := addFolder(t, client, srv.URL, "/home/user/docs")
 
 	// Upload a file into the folder
-	authUpload(t, client, folderURL(srv.URL, folderID)+"/backup/readme.txt", "ck1", []byte("data"))
+	authUpload(t, client, folderURL(srv.URL, folderID)+"/backup/readme.txt", sha256hex([]byte("data")), []byte("data"))
 
 	// Verify object is in store
 	store.mu.Lock()
@@ -793,7 +801,7 @@ func TestIntegration_UploadFile_HappyPath(t *testing.T) {
 	base := folderURL(srv.URL, folderID)
 
 	content := []byte("hello backup world")
-	checksum := "abc123deadbeef"
+	checksum := sha256hex(content)
 
 	resp := authUpload(t, client, base+"/backup/notes.txt", checksum, content)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -825,7 +833,7 @@ func TestIntegration_UploadFile_SkipsIfChecksumMatches(t *testing.T) {
 	base := folderURL(srv.URL, folderID)
 
 	content := []byte("same content")
-	checksum := "samechecksum123"
+	checksum := sha256hex(content)
 
 	// First upload
 	resp := authUpload(t, client, base+"/backup/doc.txt", checksum, content)
@@ -855,20 +863,23 @@ func TestIntegration_UploadFile_OverwritesOnChecksumChange(t *testing.T) {
 	folderID := addFolder(t, client, srv.URL, "/watched")
 	base := folderURL(srv.URL, folderID)
 
+	contentV1 := []byte("version 1")
+	contentV2 := []byte("version 2")
+
 	// First upload
-	resp := authUpload(t, client, base+"/backup/data.bin", "checksum-v1", []byte("version 1"))
+	resp := authUpload(t, client, base+"/backup/data.bin", sha256hex(contentV1), contentV1)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var r1 api.UploadFileResponse
 	decodeJSON(t, resp, &r1)
 
 	// Second upload — different checksum (file changed)
-	resp = authUpload(t, client, base+"/backup/data.bin", "checksum-v2", []byte("version 2"))
+	resp = authUpload(t, client, base+"/backup/data.bin", sha256hex(contentV2), contentV2)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var r2 api.UploadFileResponse
 	decodeJSON(t, resp, &r2)
 
 	assert.False(t, r2.Skipped)
-	assert.Equal(t, "checksum-v2", r2.ChecksumSHA256)
+	assert.Equal(t, sha256hex(contentV2), r2.ChecksumSHA256)
 	assert.True(t, r2.BackedUpAt.After(r1.BackedUpAt) || r2.BackedUpAt.Equal(r1.BackedUpAt))
 	assert.Equal(t, 1, r1.Version)
 	assert.Equal(t, 2, r2.Version, "version must increment when file content changes")
@@ -883,7 +894,7 @@ func TestIntegration_DownloadFile_HappyPath(t *testing.T) {
 	base := folderURL(srv.URL, folderID)
 
 	content := []byte("download me please")
-	authUpload(t, client, base+"/backup/report.pdf", "dlchecksum", content)
+	authUpload(t, client, base+"/backup/report.pdf", sha256hex(content), content)
 
 	resp := authGet(t, client, base+"/backup/report.pdf")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -917,7 +928,7 @@ func TestIntegration_BackupsIsolatedPerUser(t *testing.T) {
 	folderB := addFolder(t, clientB, srv.URL, "/b")
 
 	// User A uploads a file
-	authUpload(t, clientA, folderURL(srv.URL, folderA)+"/backup/secret.txt", "ckA", []byte("user A data"))
+	authUpload(t, clientA, folderURL(srv.URL, folderA)+"/backup/secret.txt", sha256hex([]byte("user A data")), []byte("user A data"))
 
 	// User B cannot download user A's file — wrong folder ownership
 	resp := authGet(t, clientB, folderURL(srv.URL, folderA)+"/backup/secret.txt")
@@ -937,8 +948,8 @@ func TestIntegration_TwoFolders_SameRelativePath(t *testing.T) {
 	folderB := addFolder(t, client, srv.URL, "/home/user/documents")
 
 	// Same relative path in both folders
-	authUpload(t, client, folderURL(srv.URL, folderA)+"/backup/README.md", "ckA", []byte("photos readme"))
-	authUpload(t, client, folderURL(srv.URL, folderB)+"/backup/README.md", "ckB", []byte("docs readme"))
+	authUpload(t, client, folderURL(srv.URL, folderA)+"/backup/README.md", sha256hex([]byte("photos readme")), []byte("photos readme"))
+	authUpload(t, client, folderURL(srv.URL, folderB)+"/backup/README.md", sha256hex([]byte("docs readme")), []byte("docs readme"))
 
 	// Both objects must be in store independently
 	store.mu.Lock()
@@ -966,7 +977,7 @@ func TestIntegration_UploadFile_ZeroBytes(t *testing.T) {
 	folderID := addFolder(t, client, srv.URL, "/watched")
 	base := folderURL(srv.URL, folderID)
 
-	resp := authUpload(t, client, base+"/backup/empty.txt", "e3b0c44298fc1c149afb", []byte{})
+	resp := authUpload(t, client, base+"/backup/empty.txt", sha256hex([]byte{}), []byte{})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result api.UploadFileResponse
@@ -1011,7 +1022,7 @@ func TestIntegration_DownloadFile_OrphanedRecord(t *testing.T) {
 	base := folderURL(srv.URL, folderID)
 
 	// Upload a file to create both the DB record and the object.
-	authUpload(t, client, base+"/backup/orphan.txt", "orphanck", []byte("data"))
+	authUpload(t, client, base+"/backup/orphan.txt", sha256hex([]byte("data")), []byte("data"))
 
 	// Manually wipe the object store to simulate an orphaned DB record.
 	store.mu.Lock()
@@ -1190,7 +1201,7 @@ func TestIntegration_DeleteAccount_HappyPath(t *testing.T) {
 
 	client := registerAndLogin(t, srv, "del-acct@example.com", "pass")
 	folderID := addFolder(t, client, srv.URL, "/home/user/docs")
-	authUpload(t, client, folderURL(srv.URL, folderID)+"/backup/file.txt", "ck1", []byte("data"))
+	authUpload(t, client, folderURL(srv.URL, folderID)+"/backup/file.txt", sha256hex([]byte("data")), []byte("data"))
 
 	store.mu.Lock()
 	require.Equal(t, 1, len(store.objects))
