@@ -336,6 +336,219 @@ func TestSessionSvc_AccessTokenRoundtrip(t *testing.T) {
 	assert.Equal(t, "test@example.com", claims.Email)
 }
 
+// ---- validateRelativePath unit tests ----
+
+func TestValidateRelativePath_Valid(t *testing.T) {
+	cases := []string{
+		"file.txt",
+		"a/b/c.txt",
+		"photos/2024/img.jpg",
+		"dir/sub/deep/file.bin",
+	}
+	for _, p := range cases {
+		got, err := validateRelativePath(p)
+		assert.NoError(t, err, "expected %q to be valid", p)
+		assert.Equal(t, p, got)
+	}
+}
+
+func TestValidateRelativePath_Invalid(t *testing.T) {
+	cases := []struct {
+		input string
+		desc  string
+	}{
+		{"", "empty"},
+		{"../etc/passwd", "dotdot escape"},
+		{"foo/../bar", "dotdot in middle"},
+		{"/absolute", "absolute path"},
+		{"foo\\bar", "backslash"},
+		{"foo//bar", "double slash (not canonical)"},
+		{".", "single dot"},
+	}
+	for _, tc := range cases {
+		_, err := validateRelativePath(tc.input)
+		assert.Error(t, err, "expected %q (%s) to be invalid", tc.input, tc.desc)
+	}
+}
+
+// ---- validatePassword unit tests ----
+
+func TestValidatePassword_Valid(t *testing.T) {
+	assert.NoError(t, validatePassword("pass"))       // exactly min length (4)
+	assert.NoError(t, validatePassword("password"))
+	assert.NoError(t, validatePassword("C0mpl3x!Pass"))
+}
+
+func TestValidatePassword_TooShort(t *testing.T) {
+	assert.Error(t, validatePassword("abc"))
+}
+
+func TestValidatePassword_TooLong(t *testing.T) {
+	assert.Error(t, validatePassword(strings.Repeat("x", 73))) // over bcrypt limit of 72
+}
+
+func TestValidatePassword_NULByte(t *testing.T) {
+	assert.Error(t, validatePassword("pass\x00word"))
+}
+
+// ---- Auth endpoint request validation (no DB needed) ----
+
+func TestPostLogin_MissingFields(t *testing.T) {
+	r := newTestRouter()
+
+	cases := []struct {
+		body string
+		desc string
+	}{
+		{`{"email":"","password":""}`, "both empty"},
+		{`{"email":"x@y.com","password":""}`, "missing password"},
+		{`{"email":"","password":"hunter2"}`, "missing email"},
+	}
+	for _, tc := range cases {
+		req := withAllowedOrigin(httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(tc.body)))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, tc.desc)
+	}
+}
+
+func TestPostRegister_InvalidEmail(t *testing.T) {
+	r := newTestRouter()
+
+	body := strings.NewReader(`{"email":"not-an-email","password":"password"}`)
+	req := withAllowedOrigin(httptest.NewRequest(http.MethodPost, "/api/auth/register", body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error, "email")
+}
+
+func TestPostRegister_WeakPassword(t *testing.T) {
+	r := newTestRouter()
+
+	body := strings.NewReader(`{"email":"user@example.com","password":"ab"}`)
+	req := withAllowedOrigin(httptest.NewRequest(http.MethodPost, "/api/auth/register", body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error, "password")
+}
+
+func TestPostForgotPassword_MissingEmail(t *testing.T) {
+	r := newTestRouter()
+
+	body := strings.NewReader(`{"email":""}`)
+	req := withAllowedOrigin(httptest.NewRequest(http.MethodPost, "/api/auth/forgot-password", body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestPostResetPassword_MissingToken(t *testing.T) {
+	r := newTestRouter()
+
+	body := strings.NewReader(`{"reset_token":"","new_password":"newpassword"}`)
+	req := withAllowedOrigin(httptest.NewRequest(http.MethodPost, "/api/auth/reset-password", body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestPostResetPassword_WeakNewPassword(t *testing.T) {
+	r := newTestRouter()
+
+	body := strings.NewReader(`{"reset_token":"sometoken","new_password":"x"}`)
+	req := withAllowedOrigin(httptest.NewRequest(http.MethodPost, "/api/auth/reset-password", body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error, "password")
+}
+
+// ---- Folder endpoint validation (auth required, validation fires before DB) ----
+
+func TestPostFolder_MissingPath(t *testing.T) {
+	r, svc := newTestRouterWithSvc()
+	token, err := svc.CreateAccessToken(1, "user@example.com")
+	require.NoError(t, err)
+
+	body := strings.NewReader(`{"path":""}`)
+	req := withAllowedOrigin(httptest.NewRequest(http.MethodPost, "/api/folders/", body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error, "path")
+}
+
+func TestPutFolder_EmptyName(t *testing.T) {
+	r, svc := newTestRouterWithSvc()
+	token, err := svc.CreateAccessToken(1, "user@example.com")
+	require.NoError(t, err)
+
+	body := strings.NewReader(`{"name":""}`)
+	req := withAllowedOrigin(httptest.NewRequest(http.MethodPut, "/api/folders/1/", body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error, "name")
+}
+
+func TestPutFolder_InvalidFolderID(t *testing.T) {
+	r, svc := newTestRouterWithSvc()
+	token, err := svc.CreateAccessToken(1, "user@example.com")
+	require.NoError(t, err)
+
+	req := withAllowedOrigin(httptest.NewRequest(http.MethodPut, "/api/folders/abc/", strings.NewReader(`{"name":"x"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestUploadEndpoint_FileSizeTooLarge(t *testing.T) {
+	r, svc := newTestRouterWithSvc()
+	token, err := svc.CreateAccessToken(1, "user@example.com")
+	require.NoError(t, err)
+
+	req := withAllowedOrigin(httptest.NewRequest(http.MethodPut, "/api/folders/1/backup/test.txt", nil))
+	req.AddCookie(&http.Cookie{Name: cookieAccessToken, Value: token})
+	req.Header.Set("X-Checksum-SHA256", "a3f5b2c1d4e6789012345678901234567890123456789012345678901234abcd")
+	req.Header.Set("X-File-Size", "10995116277761") // 10 GiB + 1 byte
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+}
+
 func TestAccountEndpoints_RequireAuth(t *testing.T) {
 	r := newTestRouter()
 

@@ -366,6 +366,8 @@ func GetFolderStats(ctx context.Context, pool *pgxpool.Pool, userID int64) ([]mo
 
 // SyncWatchedFiles replaces all file entries for a watched path in a single transaction.
 // The incoming slice is the complete current state of the directory.
+// Uses pgx.CopyFrom for bulk insert — significantly faster than N individual INSERTs
+// for large directory trees.
 func SyncWatchedFiles(ctx context.Context, pool *pgxpool.Pool, pathID int64, files []models.WatchedFile) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -377,13 +379,14 @@ func SyncWatchedFiles(ctx context.Context, pool *pgxpool.Pool, pathID int64, fil
 		return fmt.Errorf("clearing watched files: %w", err)
 	}
 
-	for _, f := range files {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO watched_files (path_id, name, relative_path, is_directory, size, modified_ms)
-			 VALUES ($1, $2, $3, $4, $5, $6)`,
-			pathID, f.Name, f.RelativePath, f.IsDirectory, f.Size, f.ModifiedMs,
-		); err != nil {
-			return fmt.Errorf("inserting watched file: %w", err)
+	if len(files) > 0 {
+		cols := []string{"path_id", "name", "relative_path", "is_directory", "size", "modified_ms"}
+		rows := pgx.CopyFromSlice(len(files), func(i int) ([]any, error) {
+			f := files[i]
+			return []any{pathID, f.Name, f.RelativePath, f.IsDirectory, f.Size, f.ModifiedMs}, nil
+		})
+		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"watched_files"}, cols, rows); err != nil {
+			return fmt.Errorf("bulk inserting watched files: %w", err)
 		}
 	}
 
