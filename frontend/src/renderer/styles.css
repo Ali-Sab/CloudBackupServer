@@ -615,6 +615,12 @@ button.link-btn:hover { color: var(--color-primary); }
   color: var(--color-error);
 }
 .toast-error .toast-close { color: var(--color-error); }
+.toast-info {
+  background: #0c1a2e;
+  border: 1px solid #1e3a5f;
+  color: #60a5fa;
+}
+.toast-info .toast-close { color: #60a5fa; }
 
 /* ---- App header user info (#14) ---- */
 .header-user {
@@ -1345,6 +1351,12 @@ html[data-theme="light"] .toast-error .toast-close { color: #991b1b; }
   font-size: 0.72rem;
   color: var(--color-primary);
   font-weight: 600;
+  flex-shrink: 0;
+}
+.version-provenance {
+  font-size: 0.70rem;
+  color: var(--color-muted);
+  font-style: italic;
   flex-shrink: 0;
 }
 .version-restore-btn {

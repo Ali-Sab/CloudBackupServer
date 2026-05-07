@@ -31,7 +31,7 @@ info:
     and returns a 404 when the email is not found (anti-enumeration is disabled).
     Both behaviours will be reversed before production: the token will be delivered by email
     and the response will look identical regardless of whether the email exists.
-  version: 0.5.0
+  version: 0.8.0
   license:
     name: GNU General Public License v3.0
     url: https://www.gnu.org/licenses/gpl-3.0.html
@@ -576,6 +576,16 @@ paths:
           schema:
             type: integer
           description: Exact byte count of the file.
+        - name: X-Restored-From-Version-ID
+          in: header
+          required: false
+          schema:
+            type: integer
+            format: int64
+          description: >
+            When this upload is a re-backup of a locally-restored file, set this
+            to the ID of the version that was restored. The new version row will
+            record that provenance in `restored_from_version_id`.
       requestBody:
         required: true
         content:
@@ -632,6 +642,29 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           description: DB record exists but the object is missing from storage (orphaned record)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      summary: Delete a file's cloud backup
+      description: |
+        Permanently removes the backup record and **all versions** of the specified file from
+        object storage and the database. The local file is not affected.
+      operationId: deleteFileBackup
+      tags: [Backup]
+      security:
+        - CookieAuth: []
+        - BearerAuth: []
+      responses:
+        "204":
+          description: Backup deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Database or storage failure
           content:
             application/json:
               schema:
@@ -776,6 +809,23 @@ components:
         checksum_sha256: { type: string }
         object_key:     { type: string }
         backed_up_at:   { type: string, format: date-time }
+        restored_from_version_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: >
+            If this version was created by restoring a previous version, this
+            field holds the ID of the source version. Null for versions that
+            were created by a normal backup.
+        delta_base_version_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: >
+            If non-null, the version's stored object is a binary bsdiff patch
+            rather than a full copy. Reconstructing the file requires fetching
+            the base version's bytes and applying the patch. Null for versions
+            stored as full blobs (keyframes and first version of each file).
 
     FileVersionsResponse:
       type: object
@@ -1055,6 +1105,13 @@ components:
           items:
             $ref: "#/components/schemas/FileEntry"
           description: Complete current state of the watched directory (not a delta)
+        prune_deleted:
+          type: boolean
+          default: false
+          description: |
+            When `true`, cloud backups for files not present in `files` are permanently deleted
+            from object storage. Intended for use during a backup run so that locally-deleted
+            files are also removed from the cloud.
 
     WatchedFilesResponse:
       type: object

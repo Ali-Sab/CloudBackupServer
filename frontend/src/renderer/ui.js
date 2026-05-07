@@ -54,7 +54,7 @@
     const icon = document.createElement('span');
     icon.className = 'toast-icon';
     icon.setAttribute('aria-hidden', 'true');
-    icon.textContent = type === 'error' ? '✕' : '✓';
+    icon.textContent = type === 'error' ? '✕' : type === 'info' ? 'ℹ' : '✓';
 
     const text = document.createElement('span');
     text.className = 'toast-text';

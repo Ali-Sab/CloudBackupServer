@@ -245,6 +245,11 @@ if (typeof module !== 'undefined') {
   // Populated by loadBackupStatuses; used by the metadata modal.
   const backupRecords = new Map();
 
+  // Tracks files that were restored from a specific version so the next upload
+  // for that path can tag the new version with provenance.
+  // Keys are relativePath strings; values are the source version ID (number).
+  const pendingRestoreTag = new Map();
+
   // Auto-backup debounce timer — fires N ms after the last filesystem change.
   let _autoBackupTimer = null;
   const AUTO_BACKUP_DEBOUNCE_MS = 5000;
@@ -291,6 +296,7 @@ if (typeof module !== 'undefined') {
     uploadStatus.clear();
     cloudOnlyFiles.clear();
     backupRecords.clear();
+    pendingRestoreTag.clear();
     skippedFiles.clear();
     _searchQuery = '';
     _sortField = 'name';
@@ -346,6 +352,7 @@ if (typeof module !== 'undefined') {
     uploadStatus.clear();
     cloudOnlyFiles.clear();
     backupRecords.clear();
+    pendingRestoreTag.clear();
     skippedFiles.clear();
     _searchQuery = '';
     _sortField = 'name';
@@ -509,6 +516,22 @@ if (typeof module !== 'undefined') {
     allEntries = entries;
     renderView();
 
+    // Sync file metadata and prune cloud backups for locally-deleted files.
+    const syncFiles = entries.map(function (e) {
+      return {
+        name: e.name,
+        relative_path: e.relativePath,
+        is_directory: e.isDirectory,
+        size: e.size || 0,
+        modified_ms: Math.round(e.modified || 0),
+      };
+    });
+    try {
+      await window.API.syncFolderFiles(currentFolderId, syncFiles, { pruneDeleted: true });
+    } catch {
+      // Non-fatal — continue with upload.
+    }
+
     const fileEntries = entries.filter(function (e) { return !e.isDirectory; });
     if (fileEntries.length === 0) {
       if (!(opts && opts.auto)) window.UI.toast('No files to back up');
@@ -619,12 +642,15 @@ if (typeof module !== 'undefined') {
       uploadStatus.set(entry.relativePath, 'uploading');
       renderView();
 
+      const restoredFromVersionId = pendingRestoreTag.get(entry.relativePath) || null;
+
       let result;
       try {
         result = await electronAPI.uploadFile(
           rootPath,
           entry.relativePath,
-          uploadBase
+          uploadBase,
+          restoredFromVersionId
         );
         if (result.error) {
           console.warn('[Files] backup upload failed for', entry.relativePath + ':', result.error);
@@ -634,6 +660,9 @@ if (typeof module !== 'undefined') {
         result = { error: err.message, skipped: false };
       }
 
+      if (!result.error && !result.skipped) {
+        pendingRestoreTag.delete(entry.relativePath);
+      }
       uploadStatus.set(entry.relativePath, result.error ? 'error' : 'done');
       results.push({ error: result.error || null, skipped: !!result.skipped });
       if (result.error) failed++;
@@ -975,6 +1004,13 @@ if (typeof module !== 'undefined') {
           dlBtn.setAttribute('title', 'Download from cloud');
           dlBtn.addEventListener('click', function () { downloadCloudFile(relPath); });
           li.appendChild(dlBtn);
+
+          const delBtn = document.createElement('button');
+          delBtn.className = 'cloud-delete-btn';
+          delBtn.textContent = '🗑';
+          delBtn.setAttribute('title', 'Delete from cloud');
+          delBtn.addEventListener('click', function () { deleteCloudBackup(relPath, { isCloudOnly: true }); });
+          li.appendChild(delBtn);
         } else {
           const statusEl = document.createElement('span');
           if (status === 'uploading') {
@@ -1064,6 +1100,20 @@ if (typeof module !== 'undefined') {
       }
       li.classList.toggle('skipped-file', !isSkipped);
     });
+
+    const hasBkup = uploadStatus.get(entry.relativePath) === 'done' ||
+      uploadStatus.get(entry.relativePath) === 'outdated' ||
+      backupRecords.has(entry.relativePath);
+    if (hasBkup) {
+      const delItem = document.createElement('button');
+      delItem.className = 'context-menu-item context-menu-item--danger';
+      delItem.textContent = 'Delete cloud backup';
+      delItem.addEventListener('click', function () {
+        closeMenu();
+        deleteCloudBackup(entry.relativePath, { isCloudOnly: false });
+      });
+      menu.appendChild(delItem);
+    }
 
     menu.appendChild(item);
     document.body.appendChild(menu);
@@ -1156,6 +1206,37 @@ if (typeof module !== 'undefined') {
     }
   }
 
+  // ---- Delete cloud backup ------------------------------------------------
+
+  async function deleteCloudBackup(relativePath, { isCloudOnly } = {}) {
+    if (!currentFolderId) return;
+
+    const name = relativePath.split('/').pop();
+    const msg = isCloudOnly
+      ? 'Delete "' + name + '" from cloud? This cannot be undone.'
+      : 'Delete cloud backup of "' + name + '"? The local file will not be affected.';
+
+    if (!window.confirm(msg)) return;
+
+    try {
+      const resp = await window.API.deleteFileBackup(currentFolderId, relativePath);
+      if (!resp.ok) {
+        const body = await resp.json().catch(function () { return {}; });
+        window.UI.toast('Delete failed: ' + (body.error || 'HTTP ' + resp.status), 'error');
+        return;
+      }
+    } catch (e) {
+      window.UI.toast('Delete error: ' + e.message, 'error');
+      return;
+    }
+
+    cloudOnlyFiles.delete(relativePath);
+    backupRecords.delete(relativePath);
+    uploadStatus.delete(relativePath);
+    renderView();
+    window.UI.toast('Deleted cloud backup: ' + name, 'success');
+  }
+
   // ---- Helpers ------------------------------------------------------------
 
   function escapeHtml(str) {
@@ -1190,6 +1271,107 @@ if (typeof module !== 'undefined') {
       openPreviewModal(entry);
     });
     return btn;
+  }
+
+  function reloadVersionList(ul, entry) {
+    ul.innerHTML = '';
+    ul.appendChild(Object.assign(document.createElement('li'), {
+      textContent: 'Refreshing…',
+      className: 'backup-history-item',
+    }));
+    window.API.getFileVersions(currentFolderId, entry.relativePath).then(function (r) {
+      if (!r.ok) throw new Error();
+      return r.json();
+    }).then(function (d) {
+      ul.innerHTML = '';
+      populateVersionList(ul, d.versions || [], entry);
+    }).catch(function () { ul.innerHTML = ''; });
+  }
+
+  function populateVersionList(ul, versions, entry) {
+    const versionById = new Map(versions.map(function (v) { return [v.id, v.version]; }));
+    versions.forEach(function (v) {
+      const li = document.createElement('li');
+      li.className = 'backup-history-item';
+
+      const verBadge = document.createElement('span');
+      verBadge.className = 'version-badge';
+      verBadge.textContent = 'v' + v.version;
+      li.appendChild(verBadge);
+
+      if (v.restored_from_version_id != null) {
+        const sourceVersion = versionById.get(v.restored_from_version_id);
+        const provenanceEl = document.createElement('span');
+        provenanceEl.className = 'version-provenance';
+        provenanceEl.textContent = sourceVersion != null
+          ? 'restored from v' + sourceVersion
+          : 'restored from earlier version';
+        provenanceEl.setAttribute('title', 'This version was created by restoring a previous version');
+        li.appendChild(provenanceEl);
+      }
+
+      const dateEl = document.createElement('span');
+      dateEl.className = 'backup-history-item-date';
+      dateEl.textContent = formatDate(new Date(v.backed_up_at).getTime());
+
+      const sizeEl = document.createElement('span');
+      sizeEl.textContent = formatSize(v.size || 0);
+
+      const restoreBtn = document.createElement('button');
+      restoreBtn.className = 'version-restore-btn';
+      restoreBtn.textContent = '↓ Restore';
+      restoreBtn.setAttribute('title', 'Restore this version locally and back it up immediately');
+      restoreBtn.addEventListener('click', function () {
+        restoreBtn.disabled = true;
+        restoreBtn.textContent = 'Checking…';
+
+        function doRestoreAndUpload() {
+          restoreBtn.textContent = 'Restoring…';
+          window.API.downloadFileVersion(currentFolderId, v.id).then(function (r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.arrayBuffer();
+          }).then(function (buffer) {
+            return window.electronAPI.saveFile(currentPath, entry.relativePath, buffer);
+          }).then(function (result) {
+            if (result && result.error) throw new Error(result.error);
+            restoreBtn.textContent = 'Backing up…';
+            const uploadBase = window.APIClient.BASE_URL + '/api/folders/' + currentFolderId + '/backup';
+            return window.electronAPI.uploadFile(currentPath, entry.relativePath, uploadBase, v.id);
+          }).then(function (uploadResult) {
+            if (uploadResult && uploadResult.error) throw new Error(uploadResult.error);
+            uploadStatus.set(entry.relativePath, 'done');
+            pendingRestoreTag.delete(entry.relativePath);
+            restoreBtn.textContent = '✓ Restored';
+            window.UI.toast('Restored ' + entry.name + ' to v' + v.version, 'success');
+            renderView();
+            reloadVersionList(ul, entry);
+          }).catch(function (e) {
+            restoreBtn.disabled = false;
+            restoreBtn.textContent = '↓ Restore';
+            window.UI.toast('Restore failed: ' + e.message, 'error');
+          });
+        }
+
+        // Check if local file already matches this version before restoring.
+        window.electronAPI.checksumFile(currentPath, entry.relativePath).then(function (res) {
+          if (!res.error && res.checksum && res.checksum.toLowerCase() === v.checksum_sha256.toLowerCase()) {
+            restoreBtn.disabled = false;
+            restoreBtn.textContent = '↓ Restore';
+            window.UI.toast('Local file already matches v' + v.version + ' — nothing to restore', 'info');
+          } else {
+            doRestoreAndUpload();
+          }
+        }).catch(function () {
+          // Can't stat local file (e.g. deleted) — proceed with restore anyway.
+          doRestoreAndUpload();
+        });
+      });
+
+      li.appendChild(dateEl);
+      li.appendChild(sizeEl);
+      li.appendChild(restoreBtn);
+      ul.appendChild(li);
+    });
   }
 
   function openMetadataModal(entry) {
@@ -1331,52 +1513,7 @@ if (typeof module !== 'undefined') {
         }
         const ul = document.createElement('ul');
         ul.className = 'backup-history-list';
-        versions.forEach(function (v) {
-          const li = document.createElement('li');
-          li.className = 'backup-history-item';
-
-          const verBadge = document.createElement('span');
-          verBadge.className = 'version-badge';
-          verBadge.textContent = 'v' + v.version;
-
-          const dateEl = document.createElement('span');
-          dateEl.className = 'backup-history-item-date';
-          dateEl.textContent = formatDate(new Date(v.backed_up_at).getTime());
-
-          const sizeEl = document.createElement('span');
-          sizeEl.textContent = formatSize(v.size || 0);
-
-          const restoreBtn = document.createElement('button');
-          restoreBtn.className = 'version-restore-btn';
-          restoreBtn.textContent = '↓ Restore';
-          restoreBtn.setAttribute('title', 'Download this version to your local folder');
-          restoreBtn.addEventListener('click', function () {
-            restoreBtn.disabled = true;
-            restoreBtn.textContent = 'Restoring…';
-            window.API.downloadFileVersion(currentFolderId, v.id).then(function (r) {
-              if (!r.ok) throw new Error('HTTP ' + r.status);
-              return r.arrayBuffer();
-            }).then(function (buffer) {
-              return window.electronAPI.saveFile(currentPath, entry.relativePath, buffer);
-            }).then(function (result) {
-              if (result && result.error) throw new Error(result.error);
-              restoreBtn.textContent = '✓ Restored';
-              window.UI.toast('Restored ' + entry.name + ' to v' + v.version, 'success');
-              uploadStatus.set(entry.relativePath, 'outdated');
-              renderView();
-            }).catch(function (e) {
-              restoreBtn.disabled = false;
-              restoreBtn.textContent = '↓ Restore';
-              window.UI.toast('Restore failed: ' + e.message, 'error');
-            });
-          });
-
-          li.appendChild(verBadge);
-          li.appendChild(dateEl);
-          li.appendChild(sizeEl);
-          li.appendChild(restoreBtn);
-          ul.appendChild(li);
-        });
+        populateVersionList(ul, versions, entry);
         histSection.appendChild(ul);
       }).catch(function () {
         loadingEl.textContent = 'Could not load versions';

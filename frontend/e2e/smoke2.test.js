@@ -977,3 +977,491 @@ test('T65: backup upload with missing checksum header returns 400', async () => 
 
   expect(res.status).toBe(400);
 });
+
+test('T66: DELETE /api/folders/:id/backup/:path removes the backup and returns 404 on re-download', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { cookies } = await registerFreshUser('del-backup-t66');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/notes.txt`, 'hello cloud', cookies);
+
+  // Confirm download works before deletion.
+  const beforeDel = await httpGet(`/api/folders/${folderId}/backup/notes.txt`, cookies);
+  expect(beforeDel.status).toBe(200);
+
+  // Delete the cloud backup.
+  const delRes = await httpDelete(`/api/folders/${folderId}/backup/notes.txt`, cookies);
+  expect(delRes.status).toBe(204);
+
+  // Now download should 404.
+  const afterDel = await httpGet(`/api/folders/${folderId}/backup/notes.txt`, cookies);
+  expect(afterDel.status).toBe(404);
+});
+
+test('T67: DELETE /api/folders/:id/backup/:path on non-existent file returns 404', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { cookies } = await registerFreshUser('del-notfound-t67');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  const res = await httpDelete(`/api/folders/${folderId}/backup/ghost.txt`, cookies);
+  expect(res.status).toBe(404);
+});
+
+test('T68: prune_deleted on sync removes backups for files no longer present locally', async () => {
+  test.skip(!!process.env.E2E_BACKEND_DOWN, 'backend not running');
+
+  const { cookies } = await registerFreshUser('prune-t68');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/keep.txt`, 'keep', cookies);
+  await httpUploadFile(`/api/folders/${folderId}/backup/delete.txt`, 'delete me', cookies);
+
+  // Sync with only keep.txt and prune_deleted=true.
+  const syncBody = {
+    files: [{ name: 'keep.txt', relative_path: 'keep.txt', is_directory: false, size: 4, modified_ms: 0 }],
+    prune_deleted: true,
+  };
+  const syncRes = await new Promise((resolve, reject) => {
+    const data   = Buffer.from(JSON.stringify(syncBody));
+    const parsed = new URL(`${BASE_URL}/api/folders/${folderId}/sync`);
+    const req = http.request(
+      { hostname: parsed.hostname, port: Number(parsed.port) || 80,
+        path: parsed.pathname, method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': data.length,
+                   'Origin': ORIGIN, 'Cookie': cookies } },
+      (res2) => { res2.resume(); res2.on('end', () => resolve({ status: res2.statusCode })); }
+    );
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+  expect(syncRes.status).toBe(204);
+
+  // delete.txt backup must be gone.
+  const afterDel = await httpGet(`/api/folders/${folderId}/backup/delete.txt`, cookies);
+  expect(afterDel.status).toBe(404);
+
+  // keep.txt backup must still exist.
+  const afterKeep = await httpGet(`/api/folders/${folderId}/backup/keep.txt`, cookies);
+  expect(afterKeep.status).toBe(200);
+});
+
+// ---------------------------------------------------------------------------
+// Versioning & restore tests (T69–T82)
+// ---------------------------------------------------------------------------
+
+async function httpPut(urlPath, body, cookies) {
+  return new Promise((resolve, reject) => {
+    const data   = body ? JSON.stringify(body) : null;
+    const parsed = new URL(`${BASE_URL}${urlPath}`);
+    const headers = { 'Content-Type': 'application/json', 'Origin': ORIGIN };
+    if (data) headers['Content-Length'] = Buffer.byteLength(data);
+    if (cookies) headers['Cookie'] = cookies;
+    const req = http.request(
+      { hostname: parsed.hostname, port: Number(parsed.port) || 80,
+        path: parsed.pathname, method: 'PUT', headers },
+      (res) => {
+        let raw = '';
+        res.on('data', c => { raw += c; });
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(raw), cookies: cookieJarFromSetCookie(res.headers['set-cookie']) }); }
+          catch { resolve({ status: res.statusCode, body: {}, cookies: '' }); }
+        });
+      }
+    );
+    req.on('error', reject);
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+async function httpGetJSON(urlPath, cookies) {
+  const res = await httpGetRaw(urlPath, cookies);
+  try { return { status: res.status, body: JSON.parse(res.body.toString()) }; }
+  catch { return { status: res.status, body: {} }; }
+}
+
+async function httpGetRaw(urlPath, cookies) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(`${BASE_URL}${urlPath}`);
+    const headers = { 'Origin': ORIGIN };
+    if (cookies) headers['Cookie'] = cookies;
+    const req = http.request(
+      { hostname: parsed.hostname, port: Number(parsed.port) || 80,
+        path: parsed.pathname + parsed.search, method: 'GET', headers },
+      (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks), headers: res.headers }));
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+test('T69: GET /api/folders/:id/versions?path=... returns empty array before any backup', async () => {
+  const { cookies } = await registerFreshUser('ver-empty-t69');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  const res = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('nope.txt')}`, cookies);
+  expect(res.status).toBe(200);
+  expect(res.body.versions).toEqual([]);
+});
+
+test('T70: version count increases with each distinct backup', async () => {
+  const { cookies } = await registerFreshUser('ver-count-t70');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/doc.txt`, 'version one', cookies);
+
+  const v1 = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('doc.txt')}`, cookies);
+  expect(v1.status).toBe(200);
+  expect(v1.body.versions.length).toBe(1);
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/doc.txt`, 'version two', cookies);
+
+  const v2 = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('doc.txt')}`, cookies);
+  expect(v2.status).toBe(200);
+  expect(v2.body.versions.length).toBe(2);
+});
+
+test('T71: skipped upload (same checksum) does not create a new version', async () => {
+  const { cookies } = await registerFreshUser('ver-skip-t71');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/same.txt`, 'no change', cookies);
+  await httpUploadFile(`/api/folders/${folderId}/backup/same.txt`, 'no change', cookies);
+
+  const v = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('same.txt')}`, cookies);
+  expect(v.status).toBe(200);
+  expect(v.body.versions.length).toBe(1);
+});
+
+test('T72: downloading a specific version returns the correct content', async () => {
+  const { cookies } = await registerFreshUser('ver-dl-t72');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/evolve.txt`, 'first content', cookies);
+  await httpUploadFile(`/api/folders/${folderId}/backup/evolve.txt`, 'second content', cookies);
+
+  const vr = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('evolve.txt')}`, cookies);
+  expect(vr.status).toBe(200);
+  expect(vr.body.versions.length).toBe(2);
+
+  // versions are returned newest-first; index 1 is the older one
+  const olderVersionId = vr.body.versions[1].id;
+  const dl = await httpGetRaw(`/api/folders/${folderId}/versions/${olderVersionId}`, cookies);
+  expect(dl.status).toBe(200);
+  expect(dl.body.toString()).toBe('first content');
+});
+
+test('T73: downloading an unknown version ID returns 404', async () => {
+  const { cookies } = await registerFreshUser('ver-dl-404-t73');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  const res = await httpGetRaw(`/api/folders/${folderId}/versions/999999`, cookies);
+  expect(res.status).toBe(404);
+});
+
+test('T74: user cannot download another user\'s version', async () => {
+  const { cookies: cookiesA } = await registerFreshUser('ver-iso-a-t74');
+  const { cookies: cookiesB } = await registerFreshUser('ver-iso-b-t74');
+
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookiesA);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/secret.txt`, 'top secret', cookiesA);
+
+  const vr = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('secret.txt')}`, cookiesA);
+  const versionId = vr.body.versions[0].id;
+
+  // User B tries to download user A's version
+  const dl = await httpGetRaw(`/api/folders/${folderId}/versions/${versionId}`, cookiesB);
+  expect(dl.status).toBe(404);
+});
+
+test('T75: versions are scoped to the folder — same filename in different folders has independent versions', async () => {
+  const { cookies } = await registerFreshUser('ver-scope-t75');
+
+  const r1 = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(r1.status).toBe(201);
+  const folder1 = r1.body.id;
+
+  const r2 = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(r2.status).toBe(201);
+  const folder2 = r2.body.id;
+
+  await httpUploadFile(`/api/folders/${folder1}/backup/shared.txt`, 'folder1 v1', cookies);
+  await httpUploadFile(`/api/folders/${folder1}/backup/shared.txt`, 'folder1 v2', cookies);
+  await httpUploadFile(`/api/folders/${folder2}/backup/shared.txt`, 'folder2 v1', cookies);
+
+  const v1 = await httpGetJSON(`/api/folders/${folder1}/versions?path=${encodeURIComponent('shared.txt')}`, cookies);
+  const v2 = await httpGetJSON(`/api/folders/${folder2}/versions?path=${encodeURIComponent('shared.txt')}`, cookies);
+
+  expect(v1.body.versions.length).toBe(2);
+  expect(v2.body.versions.length).toBe(1);
+});
+
+test('T76: full backup → modify → re-backup → restore old version flow', async () => {
+  const { cookies } = await registerFreshUser('ver-restore-t76');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  // Backup original content
+  await httpUploadFile(`/api/folders/${folderId}/backup/restore.txt`, 'original', cookies);
+  // Backup modified content
+  await httpUploadFile(`/api/folders/${folderId}/backup/restore.txt`, 'modified', cookies);
+
+  const vr = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('restore.txt')}`, cookies);
+  expect(vr.body.versions.length).toBe(2);
+
+  // Newest version is index 0
+  const newestContent = await httpGetRaw(`/api/folders/${folderId}/versions/${vr.body.versions[0].id}`, cookies);
+  expect(newestContent.body.toString()).toBe('modified');
+
+  // Older version is index 1
+  const olderContent = await httpGetRaw(`/api/folders/${folderId}/versions/${vr.body.versions[1].id}`, cookies);
+  expect(olderContent.body.toString()).toBe('original');
+});
+
+test('T77: all versions removed when file backup is deleted', async () => {
+  const { cookies } = await registerFreshUser('ver-del-t77');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/multi.txt`, 'v1', cookies);
+  await httpUploadFile(`/api/folders/${folderId}/backup/multi.txt`, 'v2', cookies);
+
+  const before = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('multi.txt')}`, cookies);
+  expect(before.body.versions.length).toBe(2);
+
+  await httpDelete(`/api/folders/${folderId}/backup/multi.txt`, cookies);
+
+  const after = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('multi.txt')}`, cookies);
+  expect(after.status).toBe(200);
+  expect(after.body.versions).toEqual([]);
+
+  // Direct version download must also 404
+  const versionId = before.body.versions[0].id;
+  const dl = await httpGetRaw(`/api/folders/${folderId}/versions/${versionId}`, cookies);
+  expect(dl.status).toBe(404);
+});
+
+test('T78: prune_deleted removes versions for deleted files, keeps versions for retained files', async () => {
+  const { cookies } = await registerFreshUser('ver-prune-t78');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/keep.txt`, 'keep v1', cookies);
+  await httpUploadFile(`/api/folders/${folderId}/backup/keep.txt`, 'keep v2', cookies);
+  await httpUploadFile(`/api/folders/${folderId}/backup/gone.txt`, 'gone v1', cookies);
+  await httpUploadFile(`/api/folders/${folderId}/backup/gone.txt`, 'gone v2', cookies);
+
+  const syncBody = {
+    files: [{ name: 'keep.txt', relative_path: 'keep.txt', is_directory: false, size: 7, modified_ms: 0 }],
+    prune_deleted: true,
+  };
+  const syncRes = await httpPut(`/api/folders/${folderId}/sync`, syncBody, cookies);
+  expect(syncRes.status).toBe(204);
+
+  // gone.txt versions should be gone
+  const goneVers = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('gone.txt')}`, cookies);
+  expect(goneVers.body.versions).toEqual([]);
+
+  // keep.txt versions should still exist
+  const keepVers = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('keep.txt')}`, cookies);
+  expect(keepVers.body.versions.length).toBe(2);
+});
+
+test('T79: GET /api/folders/:id/backups lists all current backed-up files with correct metadata', async () => {
+  const { cookies } = await registerFreshUser('backups-list-t79');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/alpha.txt`, 'aaa', cookies);
+  await httpUploadFile(`/api/folders/${folderId}/backup/beta.txt`, 'bbb', cookies);
+
+  const res = await httpGet(`/api/folders/${folderId}/backups`, cookies);
+  expect(res.status).toBe(200);
+  const paths = res.body.backups.map(b => b.relative_path).sort();
+  expect(paths).toEqual(['alpha.txt', 'beta.txt']);
+});
+
+test('T80: GET /api/folders/:id/backups shows latest checksum after re-upload', async () => {
+  const { cookies } = await registerFreshUser('backups-latest-t80');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/file.txt`, 'original content', cookies);
+  const r1 = await httpGet(`/api/folders/${folderId}/backups`, cookies);
+  const checksumBefore = r1.body.backups[0].checksum_sha256;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/file.txt`, 'new content', cookies);
+  const r2 = await httpGet(`/api/folders/${folderId}/backups`, cookies);
+  const checksumAfter = r2.body.backups[0].checksum_sha256;
+
+  expect(checksumAfter).not.toBe(checksumBefore);
+});
+
+test('T81: GET /api/folders/:id/backups is empty after all files pruned via sync', async () => {
+  const { cookies } = await registerFreshUser('backups-empty-t81');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/temp.txt`, 'temporary', cookies);
+
+  const syncBody = { files: [], prune_deleted: true };
+  const syncRes = await httpPut(`/api/folders/${folderId}/sync`, syncBody, cookies);
+  expect(syncRes.status).toBe(204);
+
+  const res = await httpGet(`/api/folders/${folderId}/backups`, cookies);
+  expect(res.status).toBe(200);
+  expect(res.body.backups).toEqual([]);
+});
+
+test('T82: GET /api/history reflects backup and delete operations in order', async () => {
+  const { cookies } = await registerFreshUser('history-t82');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/log.txt`, 'entry 1', cookies);
+  await httpUploadFile(`/api/folders/${folderId}/backup/log.txt`, 'entry 2', cookies);
+
+  const res = await httpGetJSON('/api/history', cookies);
+  expect(res.status).toBe(200);
+  expect(res.body.items.length).toBeGreaterThanOrEqual(2);
+
+  // Most recent entry should reference log.txt
+  const paths = res.body.items.map(h => h.relative_path);
+  expect(paths).toContain('log.txt');
+});
+
+// ---------------------------------------------------------------------------
+// Restore provenance tests (T83–T85)
+// ---------------------------------------------------------------------------
+
+async function httpUploadFileWithHeaders(urlPath, content, cookies, extraHeaders) {
+  return new Promise((resolve, reject) => {
+    const buf    = Buffer.isBuffer(content) ? content : Buffer.from(content);
+    const sha256 = require('crypto').createHash('sha256').update(buf).digest('hex');
+    const parsed = new URL(`${BASE_URL}${urlPath}`);
+    const headers = {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(buf.length),
+      'X-Checksum-SHA256': sha256,
+      'X-File-Size': String(buf.length),
+      'Origin': ORIGIN,
+      ...(cookies ? { Cookie: cookies } : {}),
+      ...extraHeaders,
+    };
+    const req = http.request(
+      { hostname: parsed.hostname, port: Number(parsed.port) || 80,
+        path: parsed.pathname, method: 'PUT', headers },
+      (res) => {
+        let raw = '';
+        res.on('data', c => { raw += c; });
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(raw) }); }
+          catch { resolve({ status: res.statusCode, body: {} }); }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.write(buf);
+    req.end();
+  });
+}
+
+test('T83: restored version records restored_from_version_id pointing to the source version', async () => {
+  const { cookies } = await registerFreshUser('provenance-t83');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/doc.txt`, 'original', cookies);
+  await httpUploadFile(`/api/folders/${folderId}/backup/doc.txt`, 'modified', cookies);
+
+  const before = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('doc.txt')}`, cookies);
+  expect(before.body.versions.length).toBe(2);
+
+  const v1 = before.body.versions[1]; // oldest
+  const v2 = before.body.versions[0]; // newest
+  expect(v1.restored_from_version_id).toBeNull();
+  expect(v2.restored_from_version_id).toBeNull();
+
+  // Re-upload with restore provenance header.
+  const restoreRes = await httpUploadFileWithHeaders(
+    `/api/folders/${folderId}/backup/doc.txt`,
+    'original',
+    cookies,
+    { 'X-Restored-From-Version-ID': String(v1.id) }
+  );
+  expect(restoreRes.status).toBe(200);
+
+  const after = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('doc.txt')}`, cookies);
+  expect(after.body.versions.length).toBe(3);
+
+  const v3 = after.body.versions[0]; // newest
+  expect(v3.restored_from_version_id).toBe(v1.id);
+});
+
+test('T84: normal (non-restored) uploads always have null restored_from_version_id', async () => {
+  const { cookies } = await registerFreshUser('provenance-null-t84');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  await httpUploadFile(`/api/folders/${folderId}/backup/plain.txt`, 'v1', cookies);
+  await httpUploadFile(`/api/folders/${folderId}/backup/plain.txt`, 'v2', cookies);
+
+  const vr = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('plain.txt')}`, cookies);
+  for (const v of vr.body.versions) {
+    expect(v.restored_from_version_id).toBeNull();
+  }
+});
+
+test('T85: invalid X-Restored-From-Version-ID header is silently ignored', async () => {
+  const { cookies } = await registerFreshUser('provenance-invalid-t85');
+  const addRes = await httpPost('/api/folders', { path: tmpDir }, cookies);
+  expect(addRes.status).toBe(201);
+  const folderId = addRes.body.id;
+
+  const res = await httpUploadFileWithHeaders(
+    `/api/folders/${folderId}/backup/file.txt`,
+    'data',
+    cookies,
+    { 'X-Restored-From-Version-ID': 'not-a-number' }
+  );
+  expect(res.status).toBe(200);
+
+  const vr = await httpGetJSON(`/api/folders/${folderId}/versions?path=${encodeURIComponent('file.txt')}`, cookies);
+  expect(vr.body.versions.length).toBe(1);
+  expect(vr.body.versions[0].restored_from_version_id).toBeNull();
+});

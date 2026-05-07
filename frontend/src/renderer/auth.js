@@ -63,9 +63,10 @@
       el.innerHTML = '<p>Connecting to server…</p>';
 
       // Cookie auth: try a proactive refresh so a still-valid refresh cookie
-      // restores the session without requiring re-login. /api/session returns
-      // 200 {logged_in:false} when not authed, so request() can't auto-refresh
-      // there. Skip when we just logged in — cookies are already fresh.
+      // restores the session without requiring re-login. /api/session always
+      // returns 200 {logged_in:false} when not authed, so request() can't
+      // auto-refresh there — we must do it proactively here.
+      // Skip when we just logged in — cookies are already fresh.
       if (!skipRefresh) {
         try { await APIClient.tryRefresh(); } catch {}
       }
@@ -74,8 +75,25 @@
         const resp = await API.fetchSession();
         if (!resp.ok) throw new Error(`Server responded with HTTP ${resp.status}`);
         const data = await resp.json();
-        const state = renderSessionState(data);
-        renderState(el, state);
+
+        // If still not logged in after the proactive refresh (e.g. the first
+        // refresh attempt failed due to a network blip at startup), try once
+        // more before giving up and showing the login form.
+        if (!data.logged_in && !skipRefresh) {
+          try {
+            const retried = await APIClient.tryRefresh();
+            if (retried) {
+              const resp2 = await API.fetchSession();
+              if (resp2.ok) {
+                const data2 = await resp2.json();
+                renderState(el, renderSessionState(data2));
+                return;
+              }
+            }
+          } catch {}
+        }
+
+        renderState(el, renderSessionState(data));
       } catch (err) {
         if (err instanceof AuthExpiredError) {
           renderState(el, { type: 'logged-out' });

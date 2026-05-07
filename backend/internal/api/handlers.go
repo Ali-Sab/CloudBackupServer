@@ -176,7 +176,8 @@ type FileEntry struct {
 
 // SyncWatchedFilesRequest is the body expected by PUT /api/folders/{id}/sync.
 type SyncWatchedFilesRequest struct {
-	Files []FileEntry `json:"files"`
+	Files         []FileEntry `json:"files"`
+	PruneDeleted  bool        `json:"prune_deleted"`
 }
 
 // WatchedFilesResponse is returned by GET /api/folders/{id}/files.
@@ -255,7 +256,6 @@ func validatePassword(p string) error {
 	}
 	return nil
 }
-
 // issueTokenPair creates a new access token and refresh token for the given user,
 // persists the refresh token hash to the database, and returns both raw tokens.
 func (h *Handler) issueTokenPair(r *http.Request, user *models.User) (accessToken, rawRefresh string, err error) {

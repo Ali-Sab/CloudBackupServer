@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -430,7 +431,9 @@ func GetWatchedFiles(ctx context.Context, pool *pgxpool.Pool, pathID int64) ([]m
 // UpsertFileBackup inserts or updates the current backup record for a file, then
 // appends an immutable row to file_backup_versions so every version is preserved
 // and restorable. Both writes run in a single transaction.
-func UpsertFileBackup(ctx context.Context, pool *pgxpool.Pool, b *models.FileBackup) error {
+// restoredFromVersionID is optional (nil for normal backups); set it when the
+// upload is a restore of a previous version so provenance is recorded.
+func UpsertFileBackup(ctx context.Context, pool *pgxpool.Pool, b *models.FileBackup, restoredFromVersionID *int64) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning upsert transaction: %w", err)
@@ -455,11 +458,11 @@ func UpsertFileBackup(ctx context.Context, pool *pgxpool.Pool, b *models.FileBac
 
 	_, err = tx.Exec(ctx,
 		`INSERT INTO file_backup_versions
-		    (user_id, watched_path_id, relative_path, version, size, checksum_sha256, object_key, backed_up_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		    (user_id, watched_path_id, relative_path, version, size, checksum_sha256, object_key, backed_up_at, restored_from_version_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (watched_path_id, relative_path, version) DO NOTHING`,
 		b.UserID, b.WatchedPathID, b.RelativePath, b.Version,
-		b.Size, b.ChecksumSHA256, b.ObjectKey, b.BackedUpAt,
+		b.Size, b.ChecksumSHA256, b.ObjectKey, b.BackedUpAt, restoredFromVersionID,
 	)
 	if err != nil {
 		return fmt.Errorf("inserting file backup version: %w", err)
@@ -473,19 +476,26 @@ func UpsertFileBackup(ctx context.Context, pool *pgxpool.Pool, b *models.FileBac
 
 // FileVersion is a single restorable version of a backed-up file.
 type FileVersion struct {
-	ID             int64     `json:"id"`
-	WatchedPathID  int64     `json:"-"`
-	Version        int       `json:"version"`
-	Size           int64     `json:"size"`
-	ChecksumSHA256 string    `json:"checksum_sha256"`
-	ObjectKey      string    `json:"object_key"`
-	BackedUpAt     time.Time `json:"backed_up_at"`
+	ID                    int64     `json:"id"`
+	WatchedPathID         int64     `json:"-"`
+	UserID                int64     `json:"-"`
+	Version               int       `json:"version"`
+	Size                  int64     `json:"size"`
+	ChecksumSHA256        string    `json:"checksum_sha256"`
+	ObjectKey             string    `json:"object_key"`
+	BackedUpAt            time.Time `json:"backed_up_at"`
+	RestoredFromVersionID *int64    `json:"restored_from_version_id"`
+	// DeltaBaseVersionID is non-nil when ObjectKey points to a binary delta
+	// (bsdiff patch) rather than a full copy of the file. The referenced version
+	// holds the base bytes to apply the patch against.
+	DeltaBaseVersionID    *int64    `json:"delta_base_version_id"`
 }
 
 // GetFileVersions returns all preserved versions for a file, newest first.
 func GetFileVersions(ctx context.Context, pool *pgxpool.Pool, watchedPathID int64, relativePath string) ([]FileVersion, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT id, version, size, checksum_sha256, object_key, backed_up_at
+		`SELECT id, version, size, checksum_sha256, object_key, backed_up_at,
+		        restored_from_version_id, delta_base_version_id
 		 FROM file_backup_versions
 		 WHERE watched_path_id = $1 AND relative_path = $2
 		 ORDER BY version DESC`,
@@ -499,7 +509,7 @@ func GetFileVersions(ctx context.Context, pool *pgxpool.Pool, watchedPathID int6
 	var versions []FileVersion
 	for rows.Next() {
 		var v FileVersion
-		if err := rows.Scan(&v.ID, &v.Version, &v.Size, &v.ChecksumSHA256, &v.ObjectKey, &v.BackedUpAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.Version, &v.Size, &v.ChecksumSHA256, &v.ObjectKey, &v.BackedUpAt, &v.RestoredFromVersionID, &v.DeltaBaseVersionID); err != nil {
 			return nil, fmt.Errorf("scanning file version: %w", err)
 		}
 		versions = append(versions, v)
@@ -510,15 +520,86 @@ func GetFileVersions(ctx context.Context, pool *pgxpool.Pool, watchedPathID int6
 	return versions, rows.Err()
 }
 
+// SetVersionDelta updates a version row to record that its object_key is a binary
+// delta patch against delta_base_version_id rather than a full copy of the file.
+func SetVersionDelta(ctx context.Context, pool *pgxpool.Pool, versionID, deltaBaseVersionID int64, deltaObjectKey string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE file_backup_versions
+		 SET object_key = $1, delta_base_version_id = $2
+		 WHERE id = $3`,
+		deltaObjectKey, deltaBaseVersionID, versionID,
+	)
+	return err
+}
+
+// GetFileVersionByIDInternal returns a version row by ID without user scoping.
+// Only used internally for delta chain reconstruction where the chain is already
+// validated to belong to the same user.
+func GetFileVersionByIDInternal(ctx context.Context, pool *pgxpool.Pool, versionID int64) (*FileVersion, error) {
+	v := &FileVersion{}
+	err := pool.QueryRow(ctx,
+		`SELECT id, user_id, watched_path_id, version, size, checksum_sha256, object_key,
+		        backed_up_at, restored_from_version_id, delta_base_version_id
+		 FROM file_backup_versions WHERE id = $1`,
+		versionID,
+	).Scan(&v.ID, &v.UserID, &v.WatchedPathID, &v.Version, &v.Size, &v.ChecksumSHA256, &v.ObjectKey,
+		&v.BackedUpAt, &v.RestoredFromVersionID, &v.DeltaBaseVersionID)
+	if err != nil {
+		return nil, fmt.Errorf("getting file version internal: %w", err)
+	}
+	return v, nil
+}
+
+// CountVersionsForObjectKey returns the number of file_backup_versions rows that
+// still reference the given object key. Used to determine whether a
+// content-addressable blob can be safely deleted from storage.
+func CountVersionsForObjectKey(ctx context.Context, pool *pgxpool.Pool, objectKey string) (int, error) {
+	var count int
+	err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM file_backup_versions WHERE object_key = $1`,
+		objectKey,
+	).Scan(&count)
+	return count, err
+}
+
+// GetFileVersionByNumber returns the version row for a specific version number of a file.
+func GetFileVersionByNumber(ctx context.Context, pool *pgxpool.Pool, watchedPathID int64, relativePath string, version int) (*FileVersion, error) {
+	v := &FileVersion{}
+	err := pool.QueryRow(ctx,
+		`SELECT id, user_id, watched_path_id, version, size, checksum_sha256, object_key,
+		        backed_up_at, restored_from_version_id, delta_base_version_id
+		 FROM file_backup_versions
+		 WHERE watched_path_id = $1 AND relative_path = $2 AND version = $3`,
+		watchedPathID, relativePath, version,
+	).Scan(&v.ID, &v.UserID, &v.WatchedPathID, &v.Version, &v.Size, &v.ChecksumSHA256, &v.ObjectKey,
+		&v.BackedUpAt, &v.RestoredFromVersionID, &v.DeltaBaseVersionID)
+	if err != nil {
+		return nil, fmt.Errorf("getting file version by number: %w", err)
+	}
+	return v, nil
+}
+
+// UpdateFileVersionObjectKey sets the object_key for a specific version row.
+func UpdateFileVersionObjectKey(ctx context.Context, pool *pgxpool.Pool, watchedPathID int64, relativePath string, version int64, objectKey string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE file_backup_versions SET object_key = $1
+		 WHERE watched_path_id = $2 AND relative_path = $3 AND version = $4`,
+		objectKey, watchedPathID, relativePath, version,
+	)
+	return err
+}
+
 // GetFileVersionByID returns a single version row by its primary key, scoped to userID.
 func GetFileVersionByID(ctx context.Context, pool *pgxpool.Pool, versionID, userID int64) (*FileVersion, error) {
 	v := &FileVersion{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, watched_path_id, version, size, checksum_sha256, object_key, backed_up_at
+		`SELECT id, user_id, watched_path_id, version, size, checksum_sha256, object_key,
+		        backed_up_at, restored_from_version_id, delta_base_version_id
 		 FROM file_backup_versions
 		 WHERE id = $1 AND user_id = $2`,
 		versionID, userID,
-	).Scan(&v.ID, &v.WatchedPathID, &v.Version, &v.Size, &v.ChecksumSHA256, &v.ObjectKey, &v.BackedUpAt)
+	).Scan(&v.ID, &v.UserID, &v.WatchedPathID, &v.Version, &v.Size, &v.ChecksumSHA256, &v.ObjectKey,
+		&v.BackedUpAt, &v.RestoredFromVersionID, &v.DeltaBaseVersionID)
 	if err != nil {
 		return nil, fmt.Errorf("getting file version: %w", err)
 	}
@@ -601,6 +682,249 @@ func GetBackupHistory(ctx context.Context, pool *pgxpool.Pool, userID, folderID 
 		items = []HistoryItem{}
 	}
 	return items, rows.Err()
+}
+
+// DeleteFileBackup removes the backup record (and all versions) for a single file path.
+// It returns the object keys that should be deleted from storage (current + all versions).
+// Returns an error wrapping pgx.ErrNoRows if no backup exists for the path.
+func DeleteFileBackup(ctx context.Context, pool *pgxpool.Pool, watchedPathID, userID int64, relativePath string) ([]string, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Collect all version object keys first.
+	vrows, err := tx.Query(ctx,
+		`SELECT object_key FROM file_backup_versions
+		 WHERE watched_path_id = $1 AND relative_path = $2 AND object_key != ''`,
+		watchedPathID, relativePath,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying version keys: %w", err)
+	}
+	var keys []string
+	for vrows.Next() {
+		var k string
+		if err := vrows.Scan(&k); err != nil {
+			vrows.Close()
+			return nil, fmt.Errorf("scanning version key: %w", err)
+		}
+		keys = append(keys, k)
+	}
+	vrows.Close()
+	if err := vrows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating version keys: %w", err)
+	}
+
+	// Delete versions and the current backup record.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM file_backup_versions WHERE watched_path_id = $1 AND relative_path = $2`,
+		watchedPathID, relativePath,
+	); err != nil {
+		return nil, fmt.Errorf("deleting file backup versions: %w", err)
+	}
+
+	var currentKey string
+	err = tx.QueryRow(ctx,
+		`DELETE FROM file_backups
+		 WHERE watched_path_id = $1 AND relative_path = $2 AND user_id = $3
+		 RETURNING object_key`,
+		watchedPathID, relativePath, userID,
+	).Scan(&currentKey)
+	if err != nil {
+		return nil, fmt.Errorf("deleting file backup: %w", err)
+	}
+
+	// The current key may already be in the versions list; deduplicate.
+	seen := make(map[string]bool, len(keys)+1)
+	for _, k := range keys {
+		seen[k] = true
+	}
+	if currentKey != "" && !seen[currentKey] {
+		keys = append(keys, currentKey)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing delete transaction: %w", err)
+	}
+	return keys, nil
+}
+
+// PruneDeletedBackups deletes backup records (and all versions) for files that are no longer
+// present in the provided set of current relative paths. Returns the object keys to delete
+// from storage.
+func PruneDeletedBackups(ctx context.Context, pool *pgxpool.Pool, watchedPathID int64, currentPaths []string) ([]string, error) {
+	if len(currentPaths) == 0 {
+		// All backups for this path have been removed locally — delete everything.
+		return pruneAllBackups(ctx, pool, watchedPathID)
+	}
+
+	// Build a temporary set for the query.
+	pathSet := make([]interface{}, len(currentPaths)+1)
+	pathSet[0] = watchedPathID
+	for i, p := range currentPaths {
+		pathSet[i+1] = p
+	}
+
+	// Placeholders: $2, $3, ...
+	placeholders := make([]string, len(currentPaths))
+	for i := range currentPaths {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+	}
+	inClause := strings.Join(placeholders, ", ")
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Collect version keys for stale paths.
+	vq := fmt.Sprintf(
+		`SELECT object_key FROM file_backup_versions
+		 WHERE watched_path_id = $1 AND relative_path NOT IN (%s) AND object_key != ''`,
+		inClause,
+	)
+	vrows, err := tx.Query(ctx, vq, pathSet...)
+	if err != nil {
+		return nil, fmt.Errorf("querying stale version keys: %w", err)
+	}
+	var keys []string
+	seen := map[string]bool{}
+	for vrows.Next() {
+		var k string
+		if err := vrows.Scan(&k); err != nil {
+			vrows.Close()
+			return nil, fmt.Errorf("scanning stale version key: %w", err)
+		}
+		if !seen[k] {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	vrows.Close()
+	if err := vrows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating stale version keys: %w", err)
+	}
+
+	// Collect current backup keys for stale paths.
+	bq := fmt.Sprintf(
+		`SELECT object_key FROM file_backups
+		 WHERE watched_path_id = $1 AND relative_path NOT IN (%s) AND object_key != ''`,
+		inClause,
+	)
+	brows, err := tx.Query(ctx, bq, pathSet...)
+	if err != nil {
+		return nil, fmt.Errorf("querying stale backup keys: %w", err)
+	}
+	for brows.Next() {
+		var k string
+		if err := brows.Scan(&k); err != nil {
+			brows.Close()
+			return nil, fmt.Errorf("scanning stale backup key: %w", err)
+		}
+		if !seen[k] {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	brows.Close()
+	if err := brows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating stale backup keys: %w", err)
+	}
+
+	// Delete stale version rows.
+	dq := fmt.Sprintf(
+		`DELETE FROM file_backup_versions WHERE watched_path_id = $1 AND relative_path NOT IN (%s)`,
+		inClause,
+	)
+	if _, err := tx.Exec(ctx, dq, pathSet...); err != nil {
+		return nil, fmt.Errorf("deleting stale backup versions: %w", err)
+	}
+
+	// Delete stale backup rows.
+	dq2 := fmt.Sprintf(
+		`DELETE FROM file_backups WHERE watched_path_id = $1 AND relative_path NOT IN (%s)`,
+		inClause,
+	)
+	if _, err := tx.Exec(ctx, dq2, pathSet...); err != nil {
+		return nil, fmt.Errorf("deleting stale backups: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing prune transaction: %w", err)
+	}
+	return keys, nil
+}
+
+// pruneAllBackups deletes every backup record for a watched path and returns all object keys.
+func pruneAllBackups(ctx context.Context, pool *pgxpool.Pool, watchedPathID int64) ([]string, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	vrows, err := tx.Query(ctx,
+		`SELECT object_key FROM file_backup_versions WHERE watched_path_id = $1 AND object_key != ''`,
+		watchedPathID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all version keys: %w", err)
+	}
+	seen := map[string]bool{}
+	var keys []string
+	for vrows.Next() {
+		var k string
+		if err := vrows.Scan(&k); err != nil {
+			vrows.Close()
+			return nil, fmt.Errorf("scanning version key: %w", err)
+		}
+		if !seen[k] {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	vrows.Close()
+	if err := vrows.Err(); err != nil {
+		return nil, err
+	}
+
+	brows, err := tx.Query(ctx,
+		`SELECT object_key FROM file_backups WHERE watched_path_id = $1 AND object_key != ''`,
+		watchedPathID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all backup keys: %w", err)
+	}
+	for brows.Next() {
+		var k string
+		if err := brows.Scan(&k); err != nil {
+			brows.Close()
+			return nil, fmt.Errorf("scanning backup key: %w", err)
+		}
+		if !seen[k] {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	brows.Close()
+	if err := brows.Err(); err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM file_backup_versions WHERE watched_path_id = $1`, watchedPathID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM file_backups WHERE watched_path_id = $1`, watchedPathID); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return keys, nil
 }
 
 // GetFileBackupsByWatchedPathID returns all backup records for a watched path, ordered by relative_path.

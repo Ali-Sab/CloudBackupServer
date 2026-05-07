@@ -28,8 +28,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
    * Upload a single file to the backend backup endpoint. The Electron session's
    * cookie jar is forwarded automatically — no token argument required.
    */
-  uploadFile: (rootPath, relativePath, apiBaseUrl) =>
-    ipcRenderer.invoke('upload-file', { rootPath, relativePath, apiBaseUrl }),
+  uploadFile: (rootPath, relativePath, apiBaseUrl, restoredFromVersionId) =>
+    ipcRenderer.invoke('upload-file', { rootPath, relativePath, apiBaseUrl, restoredFromVersionId }),
 
   checksumFile: (rootPath, relativePath) =>
     ipcRenderer.invoke('checksum-file', { rootPath, relativePath }),
