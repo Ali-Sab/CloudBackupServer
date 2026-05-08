@@ -112,9 +112,12 @@
      * Atomically replaces the stored file list for a folder.
      * @param {number} id
      * @param {Array<{name, relative_path, is_directory, size, modified_ms}>} files
+     * @param {{ pruneDeleted?: boolean }} [opts]
      */
-    syncFolderFiles(id, files) {
-      return APIClient.put('/api/folders/' + id + '/sync', { files });
+    syncFolderFiles(id, files, opts) {
+      const body = { files };
+      if (opts && opts.pruneDeleted) body.prune_deleted = true;
+      return APIClient.put('/api/folders/' + id + '/sync', body);
     },
 
     // ---- Per-folder backups ----
@@ -153,6 +156,16 @@
      */
     downloadFileVersion(folderId, versionId) {
       return APIClient.request('/api/folders/' + folderId + '/versions/' + versionId);
+    },
+
+    /**
+     * Delete the cloud backup (all versions) for a single file.
+     * @param {number} folderId
+     * @param {string} relativePath
+     */
+    deleteFileBackup(folderId, relativePath) {
+      const encoded = relativePath.split('/').map(encodeURIComponent).join('/');
+      return APIClient.request('/api/folders/' + folderId + '/backup/' + encoded, { method: 'DELETE' });
     },
 
     /**

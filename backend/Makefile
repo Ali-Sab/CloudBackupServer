@@ -16,9 +16,9 @@ run:
 test:
 	go test -v -race ./...
 
-## test-integration: run integration tests (requires TEST_DATABASE_URL env var)
+## test-integration: run integration tests (requires TEST_DATABASE_URL env var); set VERBOSE=1 for full output
 test-integration:
-	go test -v -race -tags integration ./...
+	go test $(if $(VERBOSE),-v,) -race -tags integration ./...
 
 ## deps: download and tidy Go modules
 deps:

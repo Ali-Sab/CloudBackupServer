@@ -61,6 +61,7 @@ func newRouter(h *Handler) *chi.Mux {
 				r.Get("/backups", h.GetFileBackups)
 				r.Put("/backup/*", h.PutFileBackup)
 				r.Get("/backup/*", h.GetFileBackup)
+				r.Delete("/backup/*", h.DeleteFileBackup)
 				r.Get("/versions", h.GetFileVersions)
 				r.Get("/versions/{versionID}", h.GetFileVersionDownload)
 			})

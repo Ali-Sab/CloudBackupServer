@@ -98,15 +98,11 @@ func (h *Handler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.storage != nil {
-		backups, err := db.GetFileBackupsByWatchedPathID(r.Context(), h.db, folderID)
-		if err != nil {
-			log.Printf("warn: failed to list backups for folder %d during delete: %v", folderID, err)
+		objectKeys, pruneErr := db.PruneDeletedBackups(r.Context(), h.db, folderID, nil)
+		if pruneErr != nil {
+			log.Printf("warn: failed to collect object keys for folder %d during delete: %v", folderID, pruneErr)
 		} else {
-			for _, b := range backups {
-				if delErr := h.storage.DeleteObject(r.Context(), b.ObjectKey); delErr != nil {
-					log.Printf("warn: failed to delete object %q for folder %d: %v", b.ObjectKey, folderID, delErr)
-				}
-			}
+			h.deleteObjectKeys(r.Context(), userID, objectKeys)
 		}
 	}
 
@@ -199,5 +195,21 @@ func (h *Handler) PutSyncFiles(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to sync files"})
 		return
 	}
+
+	if req.PruneDeleted {
+		currentPaths := make([]string, 0, len(watchedFiles))
+		for _, f := range watchedFiles {
+			if !f.IsDirectory {
+				currentPaths = append(currentPaths, f.RelativePath)
+			}
+		}
+		objectKeys, pruneErr := db.PruneDeletedBackups(r.Context(), h.db, wp.ID, currentPaths)
+		if pruneErr != nil {
+			log.Printf("warn: prune deleted backups failed for folder %d: %v", wp.ID, pruneErr)
+		} else {
+			h.deleteObjectKeys(r.Context(), userID, objectKeys)
+		}
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }

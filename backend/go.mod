@@ -3,6 +3,7 @@ module github.com/ali-sab/cloudbackupserver/backend
 go 1.25
 
 require (
+	github.com/gabstv/go-bsdiff v1.0.5
 	github.com/go-chi/chi/v5 v5.0.11
 	github.com/golang-jwt/jwt/v5 v5.2.0
 	github.com/jackc/pgx/v5 v5.5.3
@@ -14,6 +15,7 @@ require (
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dsnet/compress v0.0.0-20171208185109-cc9eb1d7ad76 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect

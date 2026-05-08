@@ -65,9 +65,11 @@ test-integration:
 	docker compose up -d postgres
 	@echo "==> Waiting for postgres to be healthy"
 	@until docker compose exec postgres pg_isready -U cloudbackup -d cloudbackup > /dev/null 2>&1; do sleep 1; done
+	@echo "==> Creating test database (if absent)"
+	@docker compose exec postgres psql -U cloudbackup -c "CREATE DATABASE cloudbackup_test;" 2>&1 | grep -v "already exists" || true
 	@echo "==> Running integration tests"
 	@set -a && . ./.env && set +a && \
-	cd backend && TEST_DATABASE_URL="postgres://cloudbackup:$${POSTGRES_PASSWORD:-cloudbackup_dev}@localhost:$${POSTGRES_PORT:-5432}/cloudbackup?sslmode=disable" go test -v -race -tags integration ./...
+	cd backend && TEST_DATABASE_URL="postgres://cloudbackup:$${POSTGRES_PASSWORD:-cloudbackup_dev}@localhost:$${POSTGRES_PORT:-5432}/cloudbackup_test?sslmode=disable" go test $(if $(VERBOSE),-v,) -race -tags integration ./...
 
 ## test-e2e: run Electron smoke tests (requires: make up)
 test-e2e:

@@ -191,7 +191,7 @@ ipcMain.handle('checksum-file', async (_event, { rootPath, relativePath }) => {
 
 // Streams a file to the backend backup endpoint. Cookies are stored in the
 // Electron session and attach automatically — no Authorization header needed.
-ipcMain.handle('upload-file', async (_event, { rootPath, relativePath, apiBaseUrl }) => {
+ipcMain.handle('upload-file', async (_event, { rootPath, relativePath, apiBaseUrl, restoredFromVersionId }) => {
   const conf = confineWithinRoot(rootPath, relativePath);
   if (conf.error) return { error: conf.error };
   const absPath = conf.absPath;
@@ -233,6 +233,7 @@ ipcMain.handle('upload-file', async (_event, { rootPath, relativePath, apiBaseUr
         'X-Checksum-SHA256': checksum,
         'X-File-Size': String(stat.size),
         'Content-Type': 'application/octet-stream',
+        ...(restoredFromVersionId ? { 'X-Restored-From-Version-ID': String(restoredFromVersionId) } : {}),
       },
     }, (res) => {
       let body = '';
