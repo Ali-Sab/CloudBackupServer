@@ -67,8 +67,9 @@
       // returns 200 {logged_in:false} when not authed, so request() can't
       // auto-refresh there — we must do it proactively here.
       // Skip when we just logged in — cookies are already fresh.
+      let firstRefreshSucceeded = false;
       if (!skipRefresh) {
-        try { await APIClient.tryRefresh(); } catch {}
+        try { firstRefreshSucceeded = await APIClient.tryRefresh(); } catch {}
       }
 
       try {
@@ -76,10 +77,12 @@
         if (!resp.ok) throw new Error(`Server responded with HTTP ${resp.status}`);
         const data = await resp.json();
 
-        // If still not logged in after the proactive refresh (e.g. the first
-        // refresh attempt failed due to a network blip at startup), try once
-        // more before giving up and showing the login form.
-        if (!data.logged_in && !skipRefresh) {
+        // If still not logged in after the proactive refresh, try once more —
+        // but ONLY if the first refresh didn't succeed. If it did succeed but
+        // fetchSession still returned logged_out (cookie propagation race in
+        // Electron's cross-origin cookie store), a second refresh would use
+        // the now-rotated old token and trigger reuse detection.
+        if (!data.logged_in && !skipRefresh && !firstRefreshSucceeded) {
           try {
             const retried = await APIClient.tryRefresh();
             if (retried) {
@@ -171,6 +174,10 @@
               <button type="button" class="password-toggle" aria-label="Show password" data-target="password">👁</button>
             </div>
           </label>
+          <label class="remember-me-label">
+            <input type="checkbox" id="remember-me" checked />
+            Remember me
+          </label>
           <div class="form-error" id="form-error">${errorMsg ? escapeHtml(errorMsg) : ''}</div>
           <button type="submit" id="login-submit-btn">Sign In</button>
           <button type="button" id="register-btn">Create Account</button>
@@ -185,18 +192,19 @@
 
     async function handleLogin(e) {
       e.preventDefault();
-      const emailInput = document.getElementById('email');
-      const passInput  = document.getElementById('password');
-      const email      = emailInput.value.trim();
-      const password   = passInput.value;
-      const errorEl    = document.getElementById('form-error');
-      const submitBtn  = document.getElementById('login-submit-btn');
+      const emailInput  = document.getElementById('email');
+      const passInput   = document.getElementById('password');
+      const rememberMe  = document.getElementById('remember-me').checked;
+      const email       = emailInput.value.trim();
+      const password    = passInput.value;
+      const errorEl     = document.getElementById('form-error');
+      const submitBtn   = document.getElementById('login-submit-btn');
       errorEl.textContent = '';
       clearFieldErrors([emailInput, passInput]);
 
       setButtonLoading(submitBtn, true, 'Signing in…');
       try {
-        const resp = await API.login(email, password);
+        const resp = await API.login(email, password, rememberMe);
         if (!resp.ok) {
           let msg = 'Login failed';
           try { msg = (await resp.json()).error || msg; } catch {}

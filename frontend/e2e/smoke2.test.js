@@ -734,10 +734,14 @@ test('T55: activity log shows at least two entries after two backups', async () 
   await page.click('#backup-now-btn');
   await page.locator('.toast-visible', { hasText: /Backup:/ }).waitFor({ timeout: 20_000 });
   await expect(page.locator('#backup-now-btn')).toHaveText('Backup Now', { timeout: 8_000 });
+  // Wait for the first toast to clear before triggering the second backup so
+  // the second toast-wait below can't match the still-visible first toast.
+  await page.locator('.toast-visible', { hasText: /Backup:/ }).waitFor({ state: 'hidden', timeout: 10_000 });
 
   // Second backup.
   await page.click('#backup-now-btn');
   await page.locator('.toast-visible', { hasText: /Backup:/ }).waitFor({ timeout: 20_000 });
+  await expect(page.locator('#backup-now-btn')).toHaveText('Backup Now', { timeout: 8_000 });
 
   await page.click('#history-nav-btn');
   await expect(page.locator('.history-card')).toBeVisible({ timeout: 5_000 });

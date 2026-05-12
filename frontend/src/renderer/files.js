@@ -517,6 +517,7 @@ if (typeof module !== 'undefined') {
     renderView();
 
     // Sync file metadata and prune cloud backups for locally-deleted files.
+    // Include cloud-only files so the backend doesn't treat them as deleted.
     const syncFiles = entries.map(function (e) {
       return {
         name: e.name,
@@ -526,6 +527,19 @@ if (typeof module !== 'undefined') {
         modified_ms: Math.round(e.modified || 0),
       };
     });
+    const localPaths = new Set(syncFiles.map(function (f) { return f.relative_path; }));
+    for (const [relPath, b] of cloudOnlyFiles) {
+      if (!localPaths.has(relPath)) {
+        const parts = relPath.split('/');
+        syncFiles.push({
+          name: parts[parts.length - 1],
+          relative_path: relPath,
+          is_directory: false,
+          size: b.size || 0,
+          modified_ms: 0,
+        });
+      }
+    }
     try {
       await window.API.syncFolderFiles(currentFolderId, syncFiles, { pruneDeleted: true });
     } catch {

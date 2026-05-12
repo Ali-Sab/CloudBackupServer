@@ -3,7 +3,6 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const http = require('http');
-const https = require('https');
 
 if (process.env.NODE_ENV === 'development') {
   require('electron-reload')(__dirname, {
@@ -86,6 +85,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      partition: 'persist:main',
     },
   });
 
@@ -204,38 +204,29 @@ ipcMain.handle('upload-file', async (_event, { rootPath, relativePath, apiBaseUr
   catch (e) { return { error: `Checksum failed: ${e.message}` }; }
 
   const encodedPath = relativePath.split('/').map(encodeURIComponent).join('/');
-  let parsedUrl;
-  try { parsedUrl = new URL(`${apiBaseUrl}/${encodedPath}`); }
+  let uploadUrl;
+  try { new URL(`${apiBaseUrl}/${encodedPath}`); uploadUrl = `${apiBaseUrl}/${encodedPath}`; }
   catch (e) { return { error: `Invalid URL: ${e.message}` }; }
 
-  const protocol = parsedUrl.protocol === 'https:' ? https : http;
-
-  // Look up cookies for the API origin from the Electron session and forward
-  // them on this http.ClientRequest, which doesn't go through Chromium.
-  const { session: electronSession } = require('electron');
-  const apiOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
-  let cookieHeader = '';
-  try {
-    const cookies = await electronSession.defaultSession.cookies.get({ url: apiOrigin });
-    cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-  } catch { /* best-effort; auth will fail downstream if unset */ }
+  // Use net.request so Chromium attaches session cookies automatically —
+  // no manual Cookie header needed.
+  const { net, session: electronSession } = require('electron');
 
   return new Promise((resolve) => {
-    const req = protocol.request({
-      hostname: parsedUrl.hostname,
-      port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
-      path: parsedUrl.pathname,
+    const req = net.request({
       method: 'PUT',
-      family: 4,
-      headers: {
-        'Cookie': cookieHeader,
-        'Origin': `http://${RENDERER_HOST}:${RENDERER_PORT}`,
-        'X-Checksum-SHA256': checksum,
-        'X-File-Size': String(stat.size),
-        'Content-Type': 'application/octet-stream',
-        ...(restoredFromVersionId ? { 'X-Restored-From-Version-ID': String(restoredFromVersionId) } : {}),
-      },
-    }, (res) => {
+      url: uploadUrl,
+      session: electronSession.fromPartition('persist:main'),
+      useSessionCookies: true,
+    });
+
+    req.setHeader('Origin', `http://${RENDERER_HOST}:${RENDERER_PORT}`);
+    req.setHeader('X-Checksum-SHA256', checksum);
+    req.setHeader('X-File-Size', String(stat.size));
+    req.setHeader('Content-Type', 'application/octet-stream');
+    if (restoredFromVersionId) req.setHeader('X-Restored-From-Version-ID', String(restoredFromVersionId));
+
+    req.on('response', (res) => {
       let body = '';
       res.on('data', chunk => { body += chunk; });
       res.on('end', () => {
@@ -253,7 +244,14 @@ ipcMain.handle('upload-file', async (_event, { rootPath, relativePath, apiBaseUr
     });
 
     req.on('error', (e) => resolve({ error: e.message }));
-    fs.createReadStream(absPath).pipe(req);
+
+    const stream = fs.createReadStream(absPath);
+    stream.on('data', chunk => {
+      if (!req.write(chunk)) stream.pause();
+    });
+    req.on('drain', () => stream.resume());
+    stream.on('end', () => req.end());
+    stream.on('error', (e) => { req.abort(); resolve({ error: e.message }); });
   });
 });
 

@@ -1070,7 +1070,7 @@ func TestIntegration_RefreshToken_Expired(t *testing.T) {
 	rawToken, hash, err := session.GenerateRefreshToken()
 	require.NoError(t, err)
 	expiredAt := time.Now().Add(-1 * time.Hour)
-	require.NoError(t, db.CreateRefreshToken(context.Background(), pool, userID, hash, expiredAt))
+	require.NoError(t, db.CreateRefreshToken(context.Background(), pool, userID, hash, expiredAt, false))
 
 	resp := postRefreshWithCookie(t, srv.URL, rawToken)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
