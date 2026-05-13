@@ -90,8 +90,9 @@ type ErrorResponse struct {
 
 // LoginRequest is the body expected by POST /api/auth/login.
 type LoginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email      string `json:"email"`
+	Password   string `json:"password"`
+	RememberMe bool   `json:"remember_me"`
 }
 
 // RegisterRequest is the body expected by POST /api/auth/register.
@@ -258,7 +259,7 @@ func validatePassword(p string) error {
 }
 // issueTokenPair creates a new access token and refresh token for the given user,
 // persists the refresh token hash to the database, and returns both raw tokens.
-func (h *Handler) issueTokenPair(r *http.Request, user *models.User) (accessToken, rawRefresh string, err error) {
+func (h *Handler) issueTokenPair(r *http.Request, user *models.User, rememberMe bool) (accessToken, rawRefresh string, err error) {
 	accessToken, err = h.sessionSvc.CreateAccessToken(user.ID, user.Email)
 	if err != nil {
 		return "", "", err
@@ -270,7 +271,7 @@ func (h *Handler) issueTokenPair(r *http.Request, user *models.User) (accessToke
 	}
 
 	expiresAt := time.Now().Add(session.RefreshTokenTTL)
-	if err := db.CreateRefreshToken(r.Context(), h.db, user.ID, hash, expiresAt); err != nil {
+	if err := db.CreateRefreshToken(r.Context(), h.db, user.ID, hash, expiresAt, rememberMe); err != nil {
 		return "", "", err
 	}
 
@@ -278,12 +279,19 @@ func (h *Handler) issueTokenPair(r *http.Request, user *models.User) (accessToke
 }
 
 // setAuthCookies installs both cookies with SameSite=Strict + HttpOnly.
-func setAuthCookies(w http.ResponseWriter, accessToken, rawRefresh string) {
+// When rememberMe is false the cookies are session-scoped (no MaxAge/Expires).
+func setAuthCookies(w http.ResponseWriter, accessToken, rawRefresh string, rememberMe bool) {
+	accessMaxAge := 0
+	refreshMaxAge := 0
+	if rememberMe {
+		accessMaxAge = int(session.AccessTokenTTL.Seconds())
+		refreshMaxAge = int(session.RefreshTokenTTL.Seconds())
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieAccessToken,
 		Value:    accessToken,
 		Path:     "/",
-		MaxAge:   int(session.AccessTokenTTL.Seconds()),
+		MaxAge:   accessMaxAge,
 		HttpOnly: true,
 		Secure:   secureCookies,
 		SameSite: http.SameSiteStrictMode,
@@ -292,7 +300,7 @@ func setAuthCookies(w http.ResponseWriter, accessToken, rawRefresh string) {
 		Name:     cookieRefreshToken,
 		Value:    rawRefresh,
 		Path:     "/",
-		MaxAge:   int(session.RefreshTokenTTL.Seconds()),
+		MaxAge:   refreshMaxAge,
 		HttpOnly: true,
 		Secure:   secureCookies,
 		SameSite: http.SameSiteStrictMode,

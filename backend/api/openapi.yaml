@@ -31,7 +31,7 @@ info:
     and returns a 404 when the email is not found (anti-enumeration is disabled).
     Both behaviours will be reversed before production: the token will be delivered by email
     and the response will look identical regardless of whether the email exists.
-  version: 0.8.0
+  version: 0.8.2
   license:
     name: GNU General Public License v3.0
     url: https://www.gnu.org/licenses/gpl-3.0.html
@@ -935,6 +935,10 @@ components:
         password:
           type: string
           format: password
+        remember_me:
+          type: boolean
+          default: false
+          description: When true, issues a persistent refresh cookie (30-day expiry); the access cookie remains short-lived (5 minutes) regardless. When false or omitted, both cookies are session-scoped.
 
     RegisterRequest:
       type: object

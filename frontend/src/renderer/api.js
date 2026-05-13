@@ -25,8 +25,8 @@
 
     // ---- Auth ----
 
-    login(email, password) {
-      return APIClient.post('/api/auth/login', { email, password });
+    login(email, password, rememberMe) {
+      return APIClient.post('/api/auth/login', { email, password, remember_me: !!rememberMe });
     },
 
     register(email, password) {

@@ -13,12 +13,13 @@ type User struct {
 
 // RefreshToken represents a stored refresh token (only the hash is persisted).
 type RefreshToken struct {
-	ID        int64
-	UserID    int64
-	TokenHash string
-	ExpiresAt time.Time
-	Revoked   bool
-	CreatedAt time.Time
+	ID         int64
+	UserID     int64
+	TokenHash  string
+	ExpiresAt  time.Time
+	Revoked    bool
+	RememberMe bool
+	CreatedAt  time.Time
 }
 
 // PasswordResetToken represents a single-use password reset token.

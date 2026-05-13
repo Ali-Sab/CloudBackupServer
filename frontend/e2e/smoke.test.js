@@ -521,6 +521,7 @@ test('T16: backup progress counter and fill bar reach the done state', async () 
   await page.waitForSelector('.folder-card', { timeout: 10_000 });
   await page.click('.open-folder-btn');
   await page.waitForSelector('#file-browser:not(.hidden)', { timeout: 8_000 });
+  await expect(page.locator('#backup-now-btn')).not.toBeDisabled({ timeout: 5_000 });
 
   await page.click('#backup-now-btn');
 
@@ -896,7 +897,7 @@ test('T30: activity log shows a row after a file is backed up', async () => {
 
   // Trigger a backup so there is at least one history row.
   await page.click('#backup-now-btn');
-  await page.waitForTimeout(2_000);
+  await page.locator('.toast-visible', { hasText: /Backup:/ }).waitFor({ timeout: 20_000 });
 
   await page.click('#history-nav-btn');
   await expect(page.locator('.history-card')).toBeVisible({ timeout: 5_000 });
