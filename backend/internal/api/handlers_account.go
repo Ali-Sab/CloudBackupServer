@@ -43,11 +43,16 @@ func (h *Handler) PutAccountEmail(w http.ResponseWriter, r *http.Request) {
 	if err := db.UpdateUserEmail(r.Context(), h.db, userID, strings.TrimSpace(req.NewEmail)); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			writeJSON(w, http.StatusConflict, ErrorResponse{Error: "email already in use"})
+			// Return generic 400 — intentionally no "email already in use" message to prevent enumeration.
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "could not update email"})
 		} else {
 			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to update email"})
 		}
 		return
+	}
+
+	if err := db.RevokeAllUserRefreshTokens(r.Context(), h.db, userID); err != nil {
+		log.Printf("warn: failed to revoke tokens after email change for user %d: %v", userID, err)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"email": strings.TrimSpace(req.NewEmail)})
 }

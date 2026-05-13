@@ -21,7 +21,14 @@ jobs:
 
       - name: Test
         working-directory: backend
-        run: go test -v -race ./...
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: backend/coverage.out
+          retention-days: 14
 
   # ---- Frontend unit tests (Jest) -----------------------------------------
   frontend-unit:

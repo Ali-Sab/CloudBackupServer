@@ -1070,7 +1070,7 @@ func TestIntegration_RefreshToken_Expired(t *testing.T) {
 	rawToken, hash, err := session.GenerateRefreshToken()
 	require.NoError(t, err)
 	expiredAt := time.Now().Add(-1 * time.Hour)
-	require.NoError(t, db.CreateRefreshToken(context.Background(), pool, userID, hash, expiredAt, false))
+	require.NoError(t, db.CreateRefreshToken(context.Background(), pool, userID, hash, expiredAt))
 
 	resp := postRefreshWithCookie(t, srv.URL, rawToken)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
@@ -1174,10 +1174,10 @@ func TestIntegration_ChangeEmail_DuplicateEmail(t *testing.T) {
 	registerAndLogin(t, srv, "existing@example.com", "pass")
 	client := registerAndLogin(t, srv, "ce-dup@example.com", "pass")
 
-	// Try to change email to the already-taken address.
+	// Duplicate email returns 400 (generic error — no enumeration of registered addresses).
 	resp := authPut(t, client, srv.URL+"/api/account/email",
 		`{"new_email":"existing@example.com","current_password":"pass"}`)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestIntegration_ChangePassword_HappyPath(t *testing.T) {

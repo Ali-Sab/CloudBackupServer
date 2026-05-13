@@ -213,7 +213,6 @@
           return;
         }
         window.UI.toast('Account deleted', 'success');
-        window.TokenStore.clear();
         setTimeout(function () { window.Auth.checkSession(); }, 800);
       } catch {
         window.UI.toast('Connection error — please try again.', 'error');

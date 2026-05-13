@@ -352,7 +352,7 @@ func (h *Handler) GetFileBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	defer reader.Close()
 
-	fileName := filepath.Base(relativePath)
+	fileName := sanitizeHeaderFilename(filepath.Base(relativePath))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
@@ -428,9 +428,13 @@ func (h *Handler) reconstructVersionBytes(ctx context.Context, v *db.FileVersion
 		return io.ReadAll(obj)
 	}
 
+	const maxDeltaChainDepth = 20
 	chain := []*db.FileVersion{v}
 	cur := v
 	for cur.DeltaBaseVersionID != nil {
+		if len(chain) >= maxDeltaChainDepth {
+			return nil, fmt.Errorf("delta chain exceeded maximum depth of %d", maxDeltaChainDepth)
+		}
 		base, err := db.GetFileVersionByIDInternal(ctx, h.db, *cur.DeltaBaseVersionID)
 		if err != nil {
 			return nil, fmt.Errorf("loading delta base version %d: %w", *cur.DeltaBaseVersionID, err)

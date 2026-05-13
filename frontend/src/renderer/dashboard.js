@@ -411,18 +411,18 @@ if (typeof module !== 'undefined') {
       actionsDiv.querySelector('.open-folder-btn').addEventListener('click', function () {
         hide();
         window.Files.show(folder.id, folder.path);
-      });
+      }, { once: true });
       actionsDiv.querySelector('.rename-folder-btn').addEventListener('click', function () {
         handleRenameFolder(folder, card);
-      });
+      }, { once: true });
       actionsDiv.querySelector('.remove-folder-btn').addEventListener('click', function () {
         handleRemoveFolder(folder.id, nameDiv.textContent, folder.path);
-      });
+      }, { once: true });
       const bb = actionsDiv.querySelector('.backup-folder-btn');
-      if (bb) bb.addEventListener('click', function () { handleBackupFolder(folder, card); });
+      if (bb) bb.addEventListener('click', function () { handleBackupFolder(folder, card); }, { once: true });
     }
 
-    cancelBtn.addEventListener('click', restore);
+    cancelBtn.addEventListener('click', restore, { once: true });
 
     async function doSave() {
       const newName = input.value.trim();
@@ -442,13 +442,13 @@ if (typeof module !== 'undefined') {
         actionsDiv.querySelector('.open-folder-btn').addEventListener('click', function () {
           hide();
           window.Files.show(folder.id, folder.path);
-        });
+        }, { once: true });
         actionsDiv.querySelector('.rename-folder-btn').addEventListener('click', function () {
           handleRenameFolder(folder, card);
-        });
+        }, { once: true });
         actionsDiv.querySelector('.remove-folder-btn').addEventListener('click', function () {
           handleRemoveFolder(folder.id, nameDiv.textContent, folder.path);
-        });
+        }, { once: true });
         window.UI.toast('Folder renamed', 'success');
       } catch {
         window.UI.toast('Could not reach server', 'error');
