@@ -9,17 +9,15 @@ info:
     This API uses a **two-token** scheme with **HttpOnly cookie delivery** as the primary
     transport (preferred for browser and Electron clients):
 
-    - **Access token** — short-lived JWT (1 minute). Set as the `access_token` HttpOnly cookie
-      (`SameSite=Lax`, `Path=/`). Also accepted as `Authorization: Bearer <token>` for
-      non-browser clients (e.g. Electron) that cannot use cookies.
+    - **Access token** — short-lived JWT (5 minutes). Set as the `access_token` HttpOnly cookie
+      (`SameSite=Strict`, `Path=/`). **Cookies are the only supported transport**; there is no
+      `Authorization: Bearer` path.
     - **Refresh token** — long-lived opaque token (30 days). Set as the `refresh_token` HttpOnly
-      cookie (`SameSite=Lax`, `Path=/api/auth/refresh`). Can also be sent in the JSON request body
-      for clients that cannot use cookies. Only the SHA-256 hash is stored in the database; the
-      raw token is never persisted.
+      cookie (`SameSite=Strict`, `Path=/`). Only the SHA-256 hash is stored in
+      the database; the raw token is never persisted.
 
-    Tokens are also returned in the JSON response body on login/register/refresh for clients
-    that cannot use cookies (e.g. Electron from a `file://` origin). Insomnia users should
-    rely on the cookie jar instead — run login once and all requests are authenticated automatically.
+    Insomnia users should rely on the cookie jar — run login once and all requests are
+    authenticated automatically.
 
     ### Token rotation
     Every call to `/api/auth/refresh` issues a *new* refresh token and revokes the old one.
@@ -31,7 +29,7 @@ info:
     and returns a 404 when the email is not found (anti-enumeration is disabled).
     Both behaviours will be reversed before production: the token will be delivered by email
     and the response will look identical regardless of whether the email exists.
-  version: 0.8.2
+  version: 0.8.4
   license:
     name: GNU General Public License v3.0
     url: https://www.gnu.org/licenses/gpl-3.0.html
@@ -40,10 +38,9 @@ servers:
   - url: http://localhost:8080
     description: Local development server
 
-# Global default: every protected endpoint requires CookieAuth (or BearerAuth as fallback).
+# Global default: every protected endpoint requires CookieAuth (cookies-only transport).
 security:
   - CookieAuth: []
-  - BearerAuth: []
 
 tags:
   - name: Health
@@ -795,8 +792,8 @@ components:
       type: http
       scheme: bearer
       description: |
-        Fallback for clients that cannot use cookies (e.g. Electron from a file:// origin).
-        Pass the `access_token` value from the login response body as `Authorization: Bearer <token>`.
+        Not currently supported. All endpoints use CookieAuth only. This entry is retained for
+        OpenAPI tooling compatibility but Bearer tokens are rejected by the server.
 
   schemas:
     FileVersion:
@@ -935,11 +932,6 @@ components:
         password:
           type: string
           format: password
-        remember_me:
-          type: boolean
-          default: false
-          description: When true, issues a persistent refresh cookie (30-day expiry); the access cookie remains short-lived (5 minutes) regardless. When false or omitted, both cookies are session-scoped.
-
     RegisterRequest:
       type: object
       required: [email, password]

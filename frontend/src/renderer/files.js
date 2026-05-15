@@ -267,7 +267,10 @@ if (typeof module !== 'undefined') {
       const btn = document.getElementById('backup-now-btn');
       // Only auto-backup when this folder is currently open and not already running.
       if (btn && !btn.disabled && currentPath && currentFolderId) {
-        backupNow({ auto: true }).catch(function () {});
+        backupNow({ auto: true }).catch(function (err) {
+          console.warn('[Files] Auto-backup failed:', err);
+          window.UI.toast('Auto-backup failed', 'error');
+        });
       }
     }, AUTO_BACKUP_DEBOUNCE_MS);
   }
@@ -1299,7 +1302,11 @@ if (typeof module !== 'undefined') {
     }).then(function (d) {
       ul.innerHTML = '';
       populateVersionList(ul, d.versions || [], entry);
-    }).catch(function () { ul.innerHTML = ''; });
+    }).catch(function (err) {
+      console.warn('[Files] Failed to load versions:', err);
+      ul.innerHTML = '<li class="backup-history-item" style="color:var(--color-error)">Could not load versions.</li>';
+      window.UI.toast('Could not load versions', 'error');
+    });
   }
 
   function populateVersionList(ul, versions, entry) {
@@ -1486,7 +1493,7 @@ if (typeof module !== 'undefined') {
               copyBtn.textContent = 'Copy';
               copyBtn.classList.remove('copied');
             }, 2000);
-          }).catch(function () {});
+          }).catch(function () { window.UI.toast('Copy failed', 'error'); });
         });
         dd.appendChild(copyBtn);
       }

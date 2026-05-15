@@ -174,10 +174,6 @@
               <button type="button" class="password-toggle" aria-label="Show password" data-target="password">👁</button>
             </div>
           </label>
-          <label class="remember-me-label">
-            <input type="checkbox" id="remember-me" checked />
-            Remember me
-          </label>
           <div class="form-error" id="form-error">${errorMsg ? escapeHtml(errorMsg) : ''}</div>
           <button type="submit" id="login-submit-btn">Sign In</button>
           <button type="button" id="register-btn">Create Account</button>
@@ -194,7 +190,6 @@
       e.preventDefault();
       const emailInput  = document.getElementById('email');
       const passInput   = document.getElementById('password');
-      const rememberMe  = document.getElementById('remember-me').checked;
       const email       = emailInput.value.trim();
       const password    = passInput.value;
       const errorEl     = document.getElementById('form-error');
@@ -204,7 +199,7 @@
 
       setButtonLoading(submitBtn, true, 'Signing in…');
       try {
-        const resp = await API.login(email, password, rememberMe);
+        const resp = await API.login(email, password);
         if (!resp.ok) {
           let msg = 'Login failed';
           try { msg = (await resp.json()).error || msg; } catch {}

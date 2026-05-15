@@ -282,17 +282,6 @@ button.link-btn {
 }
 button.link-btn:hover { color: var(--color-primary); }
 
-.remember-me-label {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.9rem;
-  color: var(--color-muted);
-  text-transform: none;
-  letter-spacing: 0;
-  cursor: pointer;
-}
-
 /* ---- Utility ---- */
 .hidden { display: none !important; }
 
@@ -1701,12 +1690,12 @@ html[data-theme="light"] .toast-error .toast-close { color: #991b1b; }
 .preview-truncation-note {
   margin-top: 12px;
   font-size: 0.78rem;
-  color: var(--color-text-muted);
+  color: var(--color-muted);
   align-self: flex-start;
 }
 .preview-loading, .preview-error {
   margin: auto;
-  color: var(--color-text-muted);
+  color: var(--color-muted);
   font-size: 0.9rem;
 }
 .preview-error { color: var(--color-error); }
@@ -1726,7 +1715,7 @@ html[data-theme="light"] .toast-error .toast-close { color: #991b1b; }
 .remove-modal-loading,
 .remove-modal-summary {
   font-size: 0.9rem;
-  color: var(--color-text-muted);
+  color: var(--color-muted);
   margin-bottom: 12px;
 }
 .remove-modal-summary { color: var(--color-error); font-weight: 600; }
@@ -1797,7 +1786,7 @@ html[data-theme="light"] .toast-error .toast-close { color: #991b1b; }
   transform: translateX(-50%);
   white-space: nowrap;
   background: var(--color-surface);
-  color: var(--color-text-muted);
+  color: var(--color-muted);
   font-size: 0.72rem;
   padding: 3px 7px;
   border-radius: 4px;
@@ -1853,7 +1842,7 @@ html[data-theme="light"] .toast-error .toast-close { color: #991b1b; }
 }
 .history-item-path {
   font-size: 0.76rem;
-  color: var(--color-text-muted);
+  color: var(--color-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1864,7 +1853,7 @@ html[data-theme="light"] .toast-error .toast-close { color: #991b1b; }
   gap: 10px;
   flex-shrink: 0;
   font-size: 0.78rem;
-  color: var(--color-text-muted);
+  color: var(--color-muted);
 }
 .history-item-time { cursor: pointer; white-space: nowrap; }
 .history-item-time:hover { color: var(--color-text); }
@@ -1875,7 +1864,7 @@ html[data-theme="light"] .toast-error .toast-close { color: #991b1b; }
   border-radius: 10px;
   padding: 1px 7px;
   font-size: 0.72rem;
-  color: var(--color-text-muted);
+  color: var(--color-muted);
   white-space: nowrap;
 }
 .history-empty {
@@ -1900,7 +1889,7 @@ html[data-theme="light"] .toast-error .toast-close { color: #991b1b; }
 .password-strength {
   margin-top: 4px;
   font-size: 0.8rem;
-  color: var(--color-text-muted, #888);
+  color: var(--color-muted);
   min-height: 1em;
 }
 .password-strength[data-score="0"] { color: #d54; }

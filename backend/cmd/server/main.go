@@ -61,6 +61,9 @@ func main() {
 	sessionSvc := session.NewService(jwtSecret)
 	router := api.NewRouter(pool, sessionSvc, store)
 
+	// ReadTimeout is intentionally omitted: upload handlers stream multi-GiB bodies and must not
+	// be interrupted mid-transfer. ReadHeaderTimeout guards against slow-header attacks, and each
+	// handler wraps its body with MaxBytesReader to enforce size limits.
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           router,

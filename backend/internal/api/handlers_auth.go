@@ -61,13 +61,13 @@ func (h *Handler) PostLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, rawRefresh, err := h.issueTokenPair(r, user, req.RememberMe)
+	accessToken, rawRefresh, err := h.issueTokenPair(r, user)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to create session"})
 		return
 	}
 
-	setAuthCookies(w, accessToken, rawRefresh, req.RememberMe)
+	setAuthCookies(w, accessToken, rawRefresh)
 	writeJSON(w, http.StatusOK, AuthResponse{User: UserInfo{ID: user.ID, Email: user.Email}})
 }
 
@@ -108,13 +108,13 @@ func (h *Handler) PostRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, rawRefresh, err := h.issueTokenPair(r, user, true)
+	accessToken, rawRefresh, err := h.issueTokenPair(r, user)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to create session"})
 		return
 	}
 
-	setAuthCookies(w, accessToken, rawRefresh, true)
+	setAuthCookies(w, accessToken, rawRefresh)
 	writeJSON(w, http.StatusCreated, AuthResponse{User: UserInfo{ID: user.ID, Email: user.Email}})
 }
 
@@ -158,13 +158,13 @@ func (h *Handler) PostRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, rawRefresh, err := h.issueTokenPair(r, user, rt.RememberMe)
+	accessToken, rawRefresh, err := h.issueTokenPair(r, user)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to issue new tokens"})
 		return
 	}
 
-	setAuthCookies(w, accessToken, rawRefresh, rt.RememberMe)
+	setAuthCookies(w, accessToken, rawRefresh)
 	writeJSON(w, http.StatusOK, AuthResponse{User: UserInfo{ID: user.ID, Email: user.Email}})
 }
 

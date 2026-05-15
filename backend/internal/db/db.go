@@ -133,10 +133,10 @@ func DeleteUser(ctx context.Context, pool *pgxpool.Pool, userID int64) error {
 // ---- Refresh tokens ----
 
 // CreateRefreshToken inserts a new refresh token row.
-func CreateRefreshToken(ctx context.Context, pool *pgxpool.Pool, userID int64, tokenHash string, expiresAt time.Time, rememberMe bool) error {
+func CreateRefreshToken(ctx context.Context, pool *pgxpool.Pool, userID int64, tokenHash string, expiresAt time.Time) error {
 	_, err := pool.Exec(ctx,
-		`INSERT INTO refresh_tokens (user_id, token_hash, expires_at, remember_me) VALUES ($1, $2, $3, $4)`,
-		userID, tokenHash, expiresAt, rememberMe,
+		`INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+		userID, tokenHash, expiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("creating refresh token: %w", err)
@@ -148,10 +148,10 @@ func CreateRefreshToken(ctx context.Context, pool *pgxpool.Pool, userID int64, t
 func GetRefreshTokenByHash(ctx context.Context, pool *pgxpool.Pool, hash string) (*models.RefreshToken, error) {
 	rt := &models.RefreshToken{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, user_id, token_hash, expires_at, revoked, remember_me, created_at
+		`SELECT id, user_id, token_hash, expires_at, revoked, created_at
 		 FROM refresh_tokens WHERE token_hash = $1`,
 		hash,
-	).Scan(&rt.ID, &rt.UserID, &rt.TokenHash, &rt.ExpiresAt, &rt.Revoked, &rt.RememberMe, &rt.CreatedAt)
+	).Scan(&rt.ID, &rt.UserID, &rt.TokenHash, &rt.ExpiresAt, &rt.Revoked, &rt.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("getting refresh token: %w", err)
 	}
@@ -529,7 +529,10 @@ func SetVersionDelta(ctx context.Context, pool *pgxpool.Pool, versionID, deltaBa
 		 WHERE id = $3`,
 		deltaObjectKey, deltaBaseVersionID, versionID,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("SetVersionDelta: %w", err)
+	}
+	return nil
 }
 
 // GetFileVersionByIDInternal returns a version row by ID without user scoping.

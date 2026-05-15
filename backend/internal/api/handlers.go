@@ -90,9 +90,8 @@ type ErrorResponse struct {
 
 // LoginRequest is the body expected by POST /api/auth/login.
 type LoginRequest struct {
-	Email      string `json:"email"`
-	Password   string `json:"password"`
-	RememberMe bool   `json:"remember_me"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 // RegisterRequest is the body expected by POST /api/auth/register.
@@ -259,7 +258,7 @@ func validatePassword(p string) error {
 }
 // issueTokenPair creates a new access token and refresh token for the given user,
 // persists the refresh token hash to the database, and returns both raw tokens.
-func (h *Handler) issueTokenPair(r *http.Request, user *models.User, rememberMe bool) (accessToken, rawRefresh string, err error) {
+func (h *Handler) issueTokenPair(r *http.Request, user *models.User) (accessToken, rawRefresh string, err error) {
 	accessToken, err = h.sessionSvc.CreateAccessToken(user.ID, user.Email)
 	if err != nil {
 		return "", "", err
@@ -271,7 +270,7 @@ func (h *Handler) issueTokenPair(r *http.Request, user *models.User, rememberMe 
 	}
 
 	expiresAt := time.Now().Add(session.RefreshTokenTTL)
-	if err := db.CreateRefreshToken(r.Context(), h.db, user.ID, hash, expiresAt, rememberMe); err != nil {
+	if err := db.CreateRefreshToken(r.Context(), h.db, user.ID, hash, expiresAt); err != nil {
 		return "", "", err
 	}
 
@@ -279,19 +278,13 @@ func (h *Handler) issueTokenPair(r *http.Request, user *models.User, rememberMe 
 }
 
 // setAuthCookies installs both cookies with SameSite=Strict + HttpOnly.
-// When rememberMe is false the cookies are session-scoped (no MaxAge/Expires).
-func setAuthCookies(w http.ResponseWriter, accessToken, rawRefresh string, rememberMe bool) {
-	accessMaxAge := 0
-	refreshMaxAge := 0
-	if rememberMe {
-		accessMaxAge = int(session.AccessTokenTTL.Seconds())
-		refreshMaxAge = int(session.RefreshTokenTTL.Seconds())
-	}
+// Cookies are always persistent — Electron keeps the session alive by default.
+func setAuthCookies(w http.ResponseWriter, accessToken, rawRefresh string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieAccessToken,
 		Value:    accessToken,
 		Path:     "/",
-		MaxAge:   accessMaxAge,
+		MaxAge:   int(session.AccessTokenTTL.Seconds()),
 		HttpOnly: true,
 		Secure:   secureCookies,
 		SameSite: http.SameSiteStrictMode,
@@ -300,7 +293,7 @@ func setAuthCookies(w http.ResponseWriter, accessToken, rawRefresh string, remem
 		Name:     cookieRefreshToken,
 		Value:    rawRefresh,
 		Path:     "/",
-		MaxAge:   refreshMaxAge,
+		MaxAge:   int(session.RefreshTokenTTL.Seconds()),
 		HttpOnly: true,
 		Secure:   secureCookies,
 		SameSite: http.SameSiteStrictMode,
@@ -322,4 +315,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// sanitizeHeaderFilename strips characters that could break a Content-Disposition header value.
+func sanitizeHeaderFilename(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if r == '"' || r == '\\' || r < 0x20 {
+			b.WriteRune('_')
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
