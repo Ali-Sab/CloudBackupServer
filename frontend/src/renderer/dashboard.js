@@ -57,6 +57,16 @@ if (typeof module !== 'undefined') {
   // ---- Public interface ---------------------------------------------------
 
   async function show() {
+    // Ensure no sibling view is stacked behind the dashboard. Files.hide() is
+    // called through the public API so it also tears down the IPC watch and
+    // keyboard handler; the others are simple overlay panels with no IPC state.
+    if (!document.getElementById('file-browser').classList.contains('hidden')) {
+      window.Files.hide();
+    }
+    ['history', 'account', 'settings'].forEach(function (id) {
+      document.getElementById(id).classList.add('hidden');
+    });
+
     const el = document.getElementById('dashboard');
     el.classList.remove('hidden');
     renderScaffold(el);
@@ -121,14 +131,33 @@ if (typeof module !== 'undefined') {
     try {
       const resp = await window.API.getFolders();
       if (!resp.ok) {
-        renderFolderList([]);
+        renderFolderListError();
         return;
       }
       const data = await resp.json();
       renderFolderList(data.folders || []);
     } catch {
-      renderFolderList([]);
+      renderFolderListError();
     }
+  }
+
+  function renderFolderListError() {
+    const container = document.getElementById('folder-list');
+    if (!container) return;
+    container.innerHTML = '';
+    const div = document.createElement('div');
+    div.className = 'empty-state folder-list-empty';
+    div.innerHTML = `
+      <div class="empty-state-icon">⚠️</div>
+      <h3 class="empty-state-title">Could not load folders</h3>
+      <p class="empty-state-body">Check your connection and try again.</p>
+    `;
+    const btn = document.createElement('button');
+    btn.className = 'empty-state-btn';
+    btn.textContent = 'Retry';
+    btn.addEventListener('click', loadAndRenderFolders);
+    div.appendChild(btn);
+    container.appendChild(div);
   }
 
   // ---- Rendering ----------------------------------------------------------

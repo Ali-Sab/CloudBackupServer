@@ -428,6 +428,23 @@ func GetWatchedFiles(ctx context.Context, pool *pgxpool.Pool, pathID int64) ([]m
 
 // ---- File backups ----
 
+// TouchFileBackedUpAt sets backed_up_at = NOW() for an existing file backup
+// without creating a new version. Used when an upload is skipped because the
+// file content is unchanged — the timestamp signals "verified in sync at this moment."
+func TouchFileBackedUpAt(ctx context.Context, pool *pgxpool.Pool, watchedPathID int64, relativePath string) (time.Time, error) {
+	var t time.Time
+	err := pool.QueryRow(ctx,
+		`UPDATE file_backups SET backed_up_at = NOW()
+		 WHERE watched_path_id = $1 AND relative_path = $2
+		 RETURNING backed_up_at`,
+		watchedPathID, relativePath,
+	).Scan(&t)
+	if err != nil {
+		return t, fmt.Errorf("TouchFileBackedUpAt: %w", err)
+	}
+	return t, nil
+}
+
 // UpsertFileBackup inserts or updates the current backup record for a file, then
 // appends an immutable row to file_backup_versions so every version is preserved
 // and restorable. Both writes run in a single transaction.

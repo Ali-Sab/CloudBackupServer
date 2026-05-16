@@ -174,6 +174,12 @@ func (h *Handler) PutFileBackup(w http.ResponseWriter, r *http.Request) {
 
 	existing, lookupErr := db.GetFileBackup(r.Context(), h.db, wp.ID, relativePath)
 	if lookupErr == nil && existing.ChecksumSHA256 == checksum {
+		// File content is unchanged — touch backed_up_at so the folder's
+		// last_backed_up_at reflects "verified in sync now," making the
+		// health indicator green after a no-op backup run.
+		if touched, err := db.TouchFileBackedUpAt(r.Context(), h.db, wp.ID, relativePath); err == nil {
+			existing.BackedUpAt = touched
+		}
 		writeJSON(w, http.StatusOK, UploadFileResponse{
 			RelativePath:   existing.RelativePath,
 			Size:           existing.Size,
